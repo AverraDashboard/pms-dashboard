@@ -6,37 +6,35 @@ import plotly.graph_objects as go
 import time
 from datetime import datetime
 
-# 🔐 PASSWORD PROTECTION
-PASSWORD = "Averra3469"
-
-def check_password():
-    def password_entered():
-        if st.session_state["password"] == PASSWORD:
-            st.session_state["authenticated"] = True
-        else:
-            st.session_state["authenticated"] = False
-
-    if "authenticated" not in st.session_state:
-        st.text_input("🔐 Enter Password", type="password", key="password", on_change=password_entered)
-        return False
-    elif not st.session_state["authenticated"]:
-        st.text_input("🔐 Enter Password", type="password", key="password", on_change=password_entered)
-        st.error("❌ Incorrect password")
-        return False
-    else:
-        return True
-
-if not check_password():
-    st.stop()
-
 # ─────────────────────────────────────────────────────────────
-# PAGE CONFIG
+# PAGE CONFIG (MUST COME FIRST)
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="PMS Dashboard – Averra",
     page_icon="📈",
     layout="wide",
 )
+
+# ─────────────────────────────────────────────────────────────
+# 🔐 PASSWORD PROTECTION
+# ─────────────────────────────────────────────────────────────
+PASSWORD = "Averra3469"
+
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    password = st.text_input("🔐 Enter Password", type="password")
+
+    if password == PASSWORD:
+        st.session_state["authenticated"] = True
+    elif password:
+        st.error("❌ Incorrect password")
+
+    return st.session_state["authenticated"]
+
+if not check_password():
+    st.stop()
 
 st.title("📈 PMS Portfolio Dashboard")
 st.caption("Averra Asset Managers LLP")
