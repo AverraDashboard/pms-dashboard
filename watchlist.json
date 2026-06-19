@@ -1,0 +1,160 @@
+{
+  "_comment": "One entry per active holding (39 total, from AS_ON_18-06-2026.xlsx). 'bse_scripname' is the search term used to resolve BSE scrip code automatically. 'thesis_keywords': filled in for holdings with deep primary research (your Averra framework names); EMPTY [] for the rest — Job 1 (direct news + BSE filings) works automatically regardless, only Job 2 (spillover detection) needs keywords. Add keywords any time for any stock — just edit the list, no other code changes needed.",
+
+  "360 ONE WAM": {
+    "isin": "INE466L01038", "nse_ticker": "360ONE", "bse_scripname": "360 ONE WAM",
+    "thesis_keywords": []
+  },
+  "Acutaas Chemicals": {
+    "isin": "INE00FF01025", "nse_ticker": "ACUTAAS", "bse_scripname": "Acutaas Chemicals",
+    "thesis_keywords": []
+  },
+  "Aequs": {
+    "isin": "INE947N01017", "nse_ticker": "AEQUS", "bse_scripname": "Aequs",
+    "thesis_keywords": ["Airbus India sourcing", "Boeing supplier India", "aerospace forging castings India"]
+  },
+  "Aptus Value Housing Finance": {
+    "isin": "INE852O01025", "nse_ticker": "APTUS", "bse_scripname": "Aptus Value Housing Finance",
+    "thesis_keywords": []
+  },
+  "ASM Technologies": {
+    "isin": "INE867C01010", "nse_ticker": "ASMTEC", "bse_scripname": "ASM Technologies",
+    "thesis_keywords": ["ER&D outsourcing India", "aerospace engineering services India", "global capability centre GCC India"]
+  },
+  "Axis Bank": {
+    "isin": "INE238A01034", "nse_ticker": "AXISBANK", "bse_scripname": "Axis Bank",
+    "thesis_keywords": []
+  },
+  "BlackBuck": {
+    "isin": "INE0UIZ01018", "nse_ticker": "BLACKBUCK", "bse_scripname": "BlackBuck",
+    "thesis_keywords": []
+  },
+  "Blue Jet Healthcare": {
+    "isin": "INE0KBH01020", "nse_ticker": "BLUEJET", "bse_scripname": "Blue Jet Healthcare",
+    "thesis_keywords": []
+  },
+  "Bajaj Finance": {
+    "isin": "INE296A01032", "nse_ticker": "BAJFINANCE", "bse_scripname": "Bajaj Finance",
+    "thesis_keywords": []
+  },
+  "Bharti Airtel": {
+    "isin": "INE397D01024", "nse_ticker": "BHARTIARTL", "bse_scripname": "Bharti Airtel",
+    "thesis_keywords": []
+  },
+  "BSE Ltd": {
+    "isin": "INE118H01025", "nse_ticker": "BSE", "bse_scripname": "BSE Ltd",
+    "thesis_keywords": ["SEBI derivatives rules", "F&O expiry change", "NSE IPO", "weekly options ban", "exchange transaction charges India"]
+  },
+  "Concord Biotech": {
+    "isin": "INE338H01029", "nse_ticker": "CONCORDBIO", "bse_scripname": "Concord Biotech",
+    "thesis_keywords": ["fermentation API capacity India", "immunosuppressant API", "oncology API export"]
+  },
+  "Dynamatic Technologies": {
+    "isin": "INE221B01012", "nse_ticker": "DYNAMATECH", "bse_scripname": "Dynamatic Technologies",
+    "thesis_keywords": ["defense indigenisation aerospace India", "Tata Boeing aerostructures"]
+  },
+  "DCB Bank": {
+    "isin": "INE503A01015", "nse_ticker": "DCBBANK", "bse_scripname": "DCB Bank",
+    "thesis_keywords": []
+  },
+  "Electronics Mart India": {
+    "isin": "INE02YR01019", "nse_ticker": "EMIL", "bse_scripname": "Electronics Mart India",
+    "thesis_keywords": []
+  },
+  "Eternal": {
+    "isin": "INE758T01015", "nse_ticker": "ETERNAL", "bse_scripname": "Eternal",
+    "thesis_keywords": ["quick commerce India", "food delivery margins India", "Blinkit Zepto Swiggy Instamart"]
+  },
+  "Five-Star Business Finance": {
+    "isin": "INE128S01021", "nse_ticker": "FIVESTAR", "bse_scripname": "Five-Star Business Finance",
+    "thesis_keywords": []
+  },
+  "GNG Electronics": {
+    "isin": "INE18JU01028", "nse_ticker": "EBGNG", "bse_scripname": "GNG Electronics",
+    "thesis_keywords": ["refurbished laptop market", "e-waste policy India"]
+  },
+  "India Shelter Finance": {
+    "isin": "INE922K01024", "nse_ticker": "INDIASHLTR", "bse_scripname": "India Shelter Finance Corporation",
+    "thesis_keywords": []
+  },
+  "Indus Towers": {
+    "isin": "INE121J01017", "nse_ticker": "INDUSTOWER", "bse_scripname": "Indus Towers",
+    "thesis_keywords": []
+  },
+  "ICICI Bank": {
+    "isin": "INE090A01021", "nse_ticker": "ICICIBANK", "bse_scripname": "ICICI Bank",
+    "thesis_keywords": []
+  },
+  "InterGlobe Aviation": {
+    "isin": "INE646L01027", "nse_ticker": "INDIGO", "bse_scripname": "InterGlobe Aviation",
+    "thesis_keywords": []
+  },
+  "Kwality Pharmaceuticals": {
+    "isin": "INE552U01010", "nse_ticker": "KPL", "bse_scripname": "Kwality Pharmaceuticals",
+    "thesis_keywords": []
+  },
+  "Lenskart Solutions": {
+    "isin": "INE956O01016", "nse_ticker": "LENSKART", "bse_scripname": "Lenskart Solutions",
+    "thesis_keywords": []
+  },
+  "Niva Bupa Health Insurance": {
+    "isin": "INE995S01015", "nse_ticker": "NIVABUPA", "bse_scripname": "Niva Bupa Health Insurance",
+    "thesis_keywords": []
+  },
+  "Nippon India ETF Liquid BeES": {
+    "isin": "INF732E01037", "nse_ticker": "LIQUIDBEES", "bse_scripname": null,
+    "thesis_keywords": []
+  },
+  "NRB Bearings": {
+    "isin": "INE349A01021", "nse_ticker": "NRBBEARING", "bse_scripname": "NRB Bearings",
+    "thesis_keywords": ["bearing imports China India", "EV driveline bearings", "auto component PLI scheme"]
+  },
+  "OneSource Specialty Pharma": {
+    "isin": "INE013P01021", "nse_ticker": "ONESOURCE", "bse_scripname": "OneSource Specialty Pharma",
+    "thesis_keywords": []
+  },
+  "Orchid Pharma": {
+    "isin": "INE191A01027", "nse_ticker": "ORCHPHARMA", "bse_scripname": "Orchid Pharma",
+    "thesis_keywords": ["antibiotic resistance FDA", "carbapenem-resistant", "cefiderocol", "Exblifep", "enmetazobactam", "BARDA antibiotic", "7-ACA price China", "Shionogi antibiotic", "Pfizer Zavicefta"]
+  },
+  "PB Fintech": {
+    "isin": "INE417T01026", "nse_ticker": "POLICYBZR", "bse_scripname": "PB Fintech",
+    "thesis_keywords": []
+  },
+  "Pine Labs": {
+    "isin": "INE15B701018", "nse_ticker": "PINELABS", "bse_scripname": "Pine Labs",
+    "thesis_keywords": []
+  },
+  "Prudent Corporate Advisory": {
+    "isin": "INE00F201020", "nse_ticker": "PRUDENT", "bse_scripname": "Prudent Corporate Advisory Services",
+    "thesis_keywords": []
+  },
+  "Samhi Hotels": {
+    "isin": "INE08U801020", "nse_ticker": "SAMHI", "bse_scripname": "Samhi Hotels",
+    "thesis_keywords": []
+  },
+  "Shadowfax Technologies": {
+    "isin": "INE12UN01015", "nse_ticker": null, "bse_scripname": "Shadowfax Technologies",
+    "thesis_keywords": ["Meesho funding", "Meesho IPO", "quick commerce logistics India", "ONDC logistics", "Delhivery quarterly results", "Ecom Express IPO"]
+  },
+  "Shaily Engineering Plastics": {
+    "isin": "INE151G01028", "nse_ticker": "SHAILY", "bse_scripname": "Shaily Engineering Plastics",
+    "thesis_keywords": ["Eli Lilly orforglipron", "oral GLP-1", "Novo Nordisk pen injector", "Ozempic Wegovy supply", "semaglutide patent", "GLP-1 auto-injector device"]
+  },
+  "Skipper Ltd": {
+    "isin": "INE439E01022", "nse_ticker": "SKIPPER", "bse_scripname": "Skipper Ltd",
+    "thesis_keywords": ["transmission tower order book India", "TBCB auction power"]
+  },
+  "TBO Tek": {
+    "isin": "INE673O01025", "nse_ticker": "TBOTEK", "bse_scripname": "TBO Tek",
+    "thesis_keywords": []
+  },
+  "Timex Group India": {
+    "isin": "INE064A01026", "nse_ticker": "TIMEX", "bse_scripname": "Timex Group India",
+    "thesis_keywords": []
+  },
+  "Ujjivan Small Finance Bank": {
+    "isin": "INE551W01018", "nse_ticker": "UJJIVANSFB", "bse_scripname": "Ujjivan Small Finance Bank",
+    "thesis_keywords": []
+  }
+}
