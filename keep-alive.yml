@@ -1,0 +1,39 @@
+name: Keep Streamlit App Awake
+
+# WHY THIS EXISTS: Streamlit Community Cloud puts any app with no traffic
+# for 12 hours to sleep. A sleeping app needs a manual "wake up" click and
+# then a ~1 minute cold start before it's usable — bad if you open the
+# dashboard first thing in the morning and it's asleep.
+#
+# Per Streamlit's own docs/community guidance: a commit to the repo (even
+# an empty one) resets the 12-hour sleep countdown, even though it won't
+# wake an ALREADY-sleeping app. Running this every 8 hours means the
+# countdown never reaches 12h, so the app should never sleep in the first
+# place as long as this workflow itself keeps running (GitHub Actions on
+# public repos runs free, no cost).
+#
+# NOTE: this keeps the app from sleeping due to inactivity. It does NOT
+# help if Streamlit Cloud itself has an outage or you hit resource limits
+# — those are separate, unrelated failure modes.
+
+"on":
+  schedule:
+    # Every 8 hours — comfortably under the 12h sleep threshold even
+    # accounting for occasional delayed runs (GitHub's schedule isn't
+    # always exactly on time).
+    - cron: "0 */8 * * *"
+  workflow_dispatch:  # lets you manually trigger a run from the Actions tab, for testing
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Make an empty commit to reset the sleep countdown
+        run: |
+          git config user.name "keep-alive-bot"
+          git config user.email "actions@github.com"
+          git commit --allow-empty -m "chore: keep-alive ping (automated)"
+          git push
