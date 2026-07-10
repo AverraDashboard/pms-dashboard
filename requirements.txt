@@ -1,8 +1,0 @@
-streamlit
-yfinance==1.4.1
-pandas
-openpyxl
-plotly
-requests
-bse
-pdfplumber
