@@ -1,0 +1,2344 @@
+"""
+Averra Portfolio Dashboard
+============================
+Works with the Nuvama "Statement of Holding" Excel export.
+
+Install:
+    pip install streamlit yfinance pandas openpyxl plotly bse requests
+
+Run:
+    streamlit run app.py
+
+Requires news_fetch.py and watchlist.json in the same folder for the
+News & BSE Filings feed at the bottom of the dashboard.
+"""
+
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import plotly.express as px
+import plotly.graph_objects as go
+import time
+from datetime import datetime
+
+# nsetools hits NSE's own website directly for live quotes — used as the
+# PRIMARY source for live price / day-change (see fetch_prices), since it
+# gives NSE's own pre-computed previousClose/pChange rather than requiring
+# us to derive day-change from historical daily bars ourselves, which is
+# where a whole class of bugs traced back to (batching issues, data gaps,
+# stale references — see comments in fetch_prices for the full history).
+# Imported defensively: if unavailable, the app falls back to the
+# yfinance-based method entirely rather than crashing.
+try:
+    from nsetools import Nse
+    NSETOOLS_AVAILABLE = True
+except ImportError:
+    NSETOOLS_AVAILABLE = False
+
+# news_fetch.py must sit alongside this file. Imported defensively so a
+# missing/broken news module degrades the news section only — it should
+# never take down the rest of the dashboard (prices, holdings, etc.).
+try:
+    import news_fetch
+    NEWS_MODULE_AVAILABLE = True
+except Exception as _news_import_err:
+    NEWS_MODULE_AVAILABLE = False
+    _NEWS_IMPORT_ERROR = str(_news_import_err)
+
+# ─────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────
+import os as _os_cfg
+_favicon_path = _os_cfg.path.join(_os_cfg.path.dirname(_os_cfg.path.abspath(__file__)), "averra_logo.png")
+_page_icon = _favicon_path if _os_cfg.path.exists(_favicon_path) else "📈"
+
+st.set_page_config(
+    page_title="Averra Portfolio Dashboard",
+    page_icon=_page_icon,
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─────────────────────────────────────────────────────────────
+# PASSWORD GATE
+# ─────────────────────────────────────────────────────────────
+def check_password():
+    # Use query params to persist login across refreshes
+    # Once logged in, token is stored in URL so F5 doesn't log out
+    params = st.query_params
+
+    # Already authenticated via session or URL token
+    if st.session_state.get("authenticated") or params.get("auth") == "ok":
+        st.session_state["authenticated"] = True
+        return True
+
+    st.markdown("""
+    <div style="
+        max-width: 400px;
+        margin: 120px auto;
+        padding: 40px;
+        background: #141a24;
+        border-radius: 6px;
+        border: 1px solid #232b38;
+        text-align: center;
+    ">
+        <div style="font-size: 2.5rem; margin-bottom: 8px;">📈</div>
+        <div style="font-size: 1.4rem; font-weight: 700; color: #e8ecf1; margin-bottom: 4px; font-family: 'Inter', sans-serif;">
+            Averra Portfolio Dashboard
+        </div>
+        <div style="font-size: 0.85rem; color: #6b7a90; margin-bottom: 28px;">
+            Enter your password to continue
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pwd = st.text_input("Password", type="password", label_visibility="collapsed",
+                            placeholder="Enter password...")
+        if st.button("Login →", use_container_width=True, type="primary"):
+            if pwd == "Averra3469":
+                st.session_state["authenticated"] = True
+                # Store auth token in URL — survives F5 refresh
+                st.query_params["auth"] = "ok"
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please try again.")
+    return False
+
+if not check_password():
+    st.stop()
+
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+
+    :root {
+        --bg-base:      #0a0e14;
+        --bg-surface:   #141a24;
+        --bg-surface-2: #1a212d;
+        --border:       #232b38;
+        --text-primary:   #e8ecf1;
+        --text-secondary: #6b7a90;
+        --text-tertiary:  #45506350;
+        --signal-pos:   #3ddc84;
+        --signal-neg:   #ff5c5c;
+        --accent:       #5b8def;
+    }
+
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .stApp { background-color: var(--bg-base); }
+
+    /* ── Tabular / monospace numerals everywhere numbers appear ── */
+    [data-testid="stMetricValue"],
+    [data-testid="stDataFrame"] *,
+    .mono-num { font-family: 'IBM Plex Mono', monospace !important; font-variant-numeric: tabular-nums; }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.9rem !important; font-weight: 600 !important;
+        color: var(--text-primary) !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.72rem !important; font-weight: 600 !important;
+        letter-spacing: 0.08em !important; text-transform: uppercase !important;
+        color: var(--text-secondary) !important;
+    }
+
+    .block-container { padding-top: 1.5rem; max-width: 1400px; }
+
+    /* ── Section eyebrow labels — the terminal-panel signature ── */
+    .section-title {
+        font-size: 0.78rem; font-weight: 700; color: var(--text-secondary);
+        letter-spacing: 0.12em; text-transform: uppercase;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 10px; margin: 28px 0 16px 0;
+    }
+
+    hr, [data-testid="stDivider"] { border-color: var(--border) !important; }
+
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] {
+        background-color: var(--bg-surface) !important;
+        border-right: 1px solid var(--border);
+    }
+    [data-testid="stSidebar"] * { color: var(--text-primary); }
+    [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small {
+        color: var(--text-secondary) !important;
+    }
+
+    /* ── Buttons — flat, hairline, no rounded-pill default ── */
+    .stButton button {
+        background-color: var(--bg-surface-2) !important;
+        border: 1px solid var(--border) !important;
+        color: var(--text-primary) !important;
+        border-radius: 4px !important;
+        font-weight: 500 !important;
+        font-size: 0.85rem !important;
+    }
+    .stButton button:hover {
+        border-color: var(--accent) !important;
+        color: var(--accent) !important;
+    }
+
+    /* ── Tabs ── */
+    .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--border); }
+    .stTabs [data-baseweb="tab"] {
+        color: var(--text-secondary); font-weight: 600; font-size: 0.85rem;
+        letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .stTabs [aria-selected="true"] { color: var(--accent) !important; }
+
+    /* ── Dataframe ── */
+    [data-testid="stDataFrame"] { border: 1px solid var(--border) !important; border-radius: 4px; }
+
+    /* ── Toast / alerts ── */
+    [data-testid="stAlert"] {
+        background-color: var(--bg-surface) !important;
+        border: 1px solid var(--border) !important;
+        color: var(--text-primary) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# ISIN → NSE TICKER MAP  (v2 — corrected)
+#
+# Symbols verified against NSE as of Mar 2026.
+# To fix a "–" live price, find the correct symbol at:
+#   https://www.nseindia.com  and update the entry below.
+# Set to None for unlisted / SME stocks.
+# ─────────────────────────────────────────────────────────────
+ISIN_TO_NSE = {
+    # ── CORRECTED in v2 ──────────────────────────────────────
+    "INE151G01028": "SHAILY",        # was SHAILYENG  ✗
+    "INE18JU01028": "EBGNG",          # confirmed NSE symbol
+    "INE089C01029": "STLTECH",       # was STRTECH    ✗
+    "INE064A01026": "TIMEX",          # BSE only — Yahoo uses TIMEX.BO
+    "INE02YR01019": "EMIL",           # confirmed NSE symbol
+
+    # ── Verified working ─────────────────────────────────────
+    "INE00F201020": "PRUDENT",
+    "INE00LO01017": "CRAFTSMAN",
+    "INE040H01021": "SUZLON",
+    "INE08U801020": "SAMHI",
+    "INE090A01021": "ICICIBANK",
+    "INE0KBH01020": "BLUEJET",
+    "INE0UIZ01018": "BLACKBUCK",
+    "INE118H01025": "BSE",
+    "INE121J01017": "INDUSTOWER",
+    "INE128S01021": "FIVESTAR",
+    "INE180A01020": "MFSL",
+    "INE191A01027": "ORCHPHARMA",
+    "INE238A01034": "AXISBANK",
+    "INE296A01032": "BAJFINANCE",
+    "INE338H01029": "CONCORDBIO",
+    "INE358U01012": "ZOTA",
+    "INE397D01024": "BHARTIARTL",
+    "INE417T01026": "POLICYBZR",
+    "INE439E01022": "SKIPPER",
+    "INE466L01038": "360ONE",
+    "INE503A01015": "DCBBANK",
+    "INE551W01018": "UJJIVANSFB",
+    "INE646L01027": "INDIGO",
+    "INE673O01025": "TBOTEK",
+    "INE758T01015": "ETERNAL",
+    "INE852O01025": "APTUS",
+    "INE883F01010": "AADHARHFC",
+    "INE947N01017": "AEQUS",
+    "INE970X01018": "LEMONTREE",
+    "INE995S01015": "NIVABUPA",
+    "INF732E01037": "LIQUIDBEES",
+
+    "INE867C01010": "ASMTEC",         # ASM Technologies — BSE only → ASMTEC.BO
+    "INE221B01012": "DYNAMATECH",      # Dynamatic Technologies — NSE listed
+    "INE552U01010": "KPL",             # Kwality Pharmaceuticals — NSE listed
+    "INE922K01024": "INDIASHLTR",      # India Shelter Finance Corporation — NSE listed
+    "INE349A01021": "NRBBEARING",      # NRB Bearings — NSE listed
+    "INE15B701018": "PINELABS",         # Pine Labs — NSE listed (IPO Nov 2025)
+    # ── Unlisted / SME — no live price ───────────────────────
+    "INE013P01021": "ONESOURCE",  # NSE listed ✓
+    "INE00FF01025": "ACUTAAS",    # NSE listed ✓
+    "INE956O01016": "LENSKART",   # NSE listed Nov 2025 ✓
+}
+
+# Stocks listed on BSE only (not NSE) — use .BO suffix
+BSE_ONLY = {
+    "INE064A01026",   # Timex Group India — BSE only → TIMEX.BO
+    "INE867C01010",   # ASM Technologies — BSE only → ASMTECH.BO
+}
+
+# ─────────────────────────────────────────────────────────────
+# CUSTOM TICKER PERSISTENCE (GitHub-backed)
+# ─────────────────────────────────────────────────────────────
+# WHY THIS EXISTS: Streamlit Community Cloud's filesystem is EPHEMERAL —
+# any file written locally while the app runs (like a plain CSV) gets
+# wiped the moment the container restarts, which happens on every sleep/
+# wake cycle and every redeploy. A custom ticker added today would
+# silently vanish tomorrow. Writing the file back to GitHub via its API
+# means the mapping lives in the same durable place as your Excel/PDF/code
+# — it survives restarts because it's now part of the repo, not the
+# container's throwaway disk.
+#
+# Needs ONE new Streamlit secret: GITHUB_TOKEN (a GitHub Personal Access
+# Token with 'repo' write access to AverraDashboard/pms-dashboard).
+# Falls back to local-only (old, session-scoped) behaviour if the token
+# is missing or the API call fails — never crashes the dashboard, just
+# silently loses durability, with a visible warning so it's not a mystery.
+
+CUSTOM_TICKER_FILE = "custom_tickers.csv"
+GITHUB_REPO = "AverraDashboard/pms-dashboard"   # owner/repo — update if it ever changes
+GITHUB_BRANCH = "main"
+
+def _github_token():
+    import os
+    tok = os.environ.get("GITHUB_TOKEN")
+    if tok:
+        return tok
+    try:
+        return st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        return None
+
+def _github_api_url():
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CUSTOM_TICKER_FILE}"
+
+def _github_get_file():
+    """Returns (content_str, sha) from GitHub, or (None, None) on any failure."""
+    import requests, base64
+    token = _github_token()
+    if not token:
+        return None, None
+    try:
+        resp = requests.get(
+            _github_api_url(),
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            params={"ref": GITHUB_BRANCH},
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return None, None  # file doesn't exist yet — normal on first-ever save
+        resp.raise_for_status()
+        data = resp.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+    except Exception as e:
+        print(f"[app] GitHub read failed for {CUSTOM_TICKER_FILE}: {e}")
+        return None, None
+
+def _github_put_file(content_str: str, sha: str | None, message: str) -> bool:
+    """Writes content_str to the file on GitHub. Returns True on success."""
+    import requests, base64
+    token = _github_token()
+    if not token:
+        return False
+    try:
+        body = {
+            "message": message,
+            "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            body["sha"] = sha
+        resp = requests.put(
+            _github_api_url(),
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            json=body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[app] GitHub write failed for {CUSTOM_TICKER_FILE}: {e}")
+        return False
+
+
+def load_custom_tickers() -> dict:
+    """
+    Loads the ISIN->Ticker map. Tries GitHub first (durable, source of
+    truth); falls back to the local CSV (survives only within the current
+    running session) if GitHub is unreachable or no token is configured.
+    """
+    import os, io
+
+    # Prefer GitHub — it's the durable copy
+    content, _ = _github_get_file()
+    if content is not None:
+        try:
+            df = pd.read_csv(io.StringIO(content))
+            result = {}
+            for _, row in df.iterrows():
+                isin   = str(row.get("ISIN","")).strip()
+                ticker = str(row.get("Ticker","")).strip()
+                if isin and ticker and isin != "nan" and ticker != "nan":
+                    result[isin] = ticker
+            return result
+        except Exception:
+            pass  # fall through to local file
+
+    # Fallback: local file (session-only durability — better than nothing
+    # if GitHub is temporarily unreachable mid-session)
+    if not os.path.exists(CUSTOM_TICKER_FILE):
+        return {}
+    try:
+        df = pd.read_csv(CUSTOM_TICKER_FILE)
+        result = {}
+        for _, row in df.iterrows():
+            isin   = str(row.get("ISIN","")).strip()
+            ticker = str(row.get("Ticker","")).strip()
+            if isin and ticker and isin != "nan" and ticker != "nan":
+                result[isin] = ticker
+        return result
+    except Exception:
+        return {}
+
+
+def save_custom_ticker(isin: str, ticker: str, exchange: str) -> tuple[str, str | None]:
+    """
+    Returns (resolved_ticker, warning_message_or_None). Doesn't call st.warning
+    directly — the caller shows it via session_state AFTER rerun, otherwise
+    the message flashes and disappears before st.rerun() wipes the page.
+    """
+    ticker = ticker.upper().strip()
+    if not ticker.endswith(".NS") and not ticker.endswith(".BO"):
+        ticker = ticker + (".BO" if exchange == "BSE" else ".NS")
+
+    existing = load_custom_tickers()
+    existing[isin.strip()] = ticker
+    rows = [{"ISIN": k, "Ticker": v} for k, v in existing.items()]
+    df = pd.DataFrame(rows)
+
+    # Always write the local copy too — instant, works even if GitHub call
+    # is slow/fails, and keeps this session correct regardless.
+    df.to_csv(CUSTOM_TICKER_FILE, index=False)
+
+    # Push to GitHub for durability across restarts
+    _, sha = _github_get_file()
+    csv_str = df.to_csv(index=False)
+    ok = _github_put_file(csv_str, sha, f"Update custom ticker: {isin} -> {ticker}")
+
+    warning_msg = None
+    if not _github_token():
+        warning_msg = (
+            "⚠️ Ticker saved for THIS SESSION ONLY. Add a `GITHUB_TOKEN` secret "
+            "(Streamlit Cloud → Settings → Secrets) so custom tickers survive "
+            "the app sleeping or redeploying."
+        )
+    elif not ok:
+        warning_msg = (
+            "⚠️ Ticker saved for this session, but couldn't sync to GitHub — "
+            "it may not survive the app sleeping. Check the GITHUB_TOKEN secret."
+        )
+    return ticker, warning_msg
+
+
+def delete_custom_ticker(isin: str):
+    existing = load_custom_tickers()
+    existing.pop(isin.strip(), None)
+    rows = [{"ISIN": k, "Ticker": v} for k, v in existing.items()]
+    df = pd.DataFrame(rows)
+    df.to_csv(CUSTOM_TICKER_FILE, index=False)
+
+    _, sha = _github_get_file()
+    csv_str = df.to_csv(index=False)
+    _github_put_file(csv_str, sha, f"Remove custom ticker: {isin}")
+
+
+def get_ticker(isin: str):
+    sym = ISIN_TO_NSE.get(isin)
+    if sym:
+        suffix = ".BO" if isin in BSE_ONLY else ".NS"
+        return f"{sym}{suffix}"
+    custom = load_custom_tickers()
+    if isin in custom:
+        return custom[isin]
+    return None
+
+# ─────────────────────────────────────────────────────────────
+# ALTERNATE TICKERS — tried if primary fails
+# ─────────────────────────────────────────────────────────────
+TICKER_ALTERNATES = {
+    "EBGNG.NS": ["GNG.NS", "GNGELECTRONICS.NS"],
+    "TIMEXIND.NS":   ["TIMEX.NS", "TIMEXGRP.NS"],
+    "EMARTINDIA.NS": ["EMARTIN.NS", "ELECTRONICSMART.NS"],
+    "SHAILY.NS":     ["SHAILYENG.NS"],
+    "STLTECH.NS":    ["STRTECH.NS", "STERLITETECH.NS"],
+    "KPL.NS":        ["KPL.BO"],   # Kwality Pharma — try BSE if NSE stale
+}
+
+
+
+# ─────────────────────────────────────────────────────────────
+# EXCEL PARSER
+# ─────────────────────────────────────────────────────────────
+def parse_nuvama_excel(uploaded_file) -> pd.DataFrame:
+    # Accept either a file path (string) or a Streamlit UploadedFile object
+    raw = pd.read_excel(uploaded_file, header=None)
+
+    header_row_idx = None
+    for i, row in raw.iterrows():
+        vals = row.astype(str).str.upper().tolist()
+        if "ISIN" in vals and any("INSTRUMENT" in v for v in vals):
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        st.error("Could not find the data header row (expected 'ISIN' + 'Instrument Name').")
+        st.stop()
+
+    df = pd.read_excel(uploaded_file, header=header_row_idx)  # works for path or file object
+    df.columns = [str(c).strip() for c in df.columns]
+
+    df = df[df["ISIN"].notna()]
+    df = df[df["ISIN"].astype(str).str.match(r"^IN[A-Z0-9]{10}$")]
+
+    for col in ["Logical Position", "Market Price", "Portfolio Value Client Currency"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["Client Name"] = (
+        df["Client Code"].astype(str)
+        .str.split(r"\s+-\s+", n=1).str[-1].str.strip()
+    )
+    return df
+
+
+def parse_master_portfolio(filepath) -> pd.DataFrame:
+    """
+    Parse Master_Model_Portfolio.xlsx.
+    Returns DataFrame with columns: ISIN, FY27_EPS, FY28_EPS, Target_FY27, Target_FY28
+    """
+    if filepath is None:
+        return pd.DataFrame(columns=["ISIN","FY27_EPS","FY28_EPS","Target_FY27","Target_FY28"])
+    try:
+        df = pd.read_excel(filepath, header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        # Rename columns to standard names
+        col_map = {}
+        for c in df.columns:
+            cu = c.upper()
+            if "ISIN" in cu:                              col_map[c] = "ISIN"
+            elif "2027 TARGET" in cu or ("TARGET" in cu and "27" in cu): col_map[c] = "Target_FY27"
+            elif "2028 TARGET" in cu or ("TARGET" in cu and "28" in cu): col_map[c] = "Target_FY28"
+            elif "EPS" in cu and "27" in cu:              col_map[c] = "FY27_EPS"
+            elif "EPS" in cu and "28" in cu:              col_map[c] = "FY28_EPS"
+        df = df.rename(columns=col_map)
+        for col in ["ISIN","FY27_EPS","FY28_EPS","Target_FY27","Target_FY28"]:
+            if col not in df.columns:
+                df[col] = None
+        for col in ["FY27_EPS","FY28_EPS","Target_FY27","Target_FY28"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["ISIN"] = df["ISIN"].astype(str).str.strip()
+        return df[["ISIN","FY27_EPS","FY28_EPS","Target_FY27","Target_FY28"]].dropna(subset=["ISIN"])
+    except Exception as e:
+        st.warning(f"Could not load Master Portfolio: {e}")
+        return pd.DataFrame(columns=["ISIN","FY27_EPS","FY28_EPS","Target_FY27","Target_FY28"])
+
+
+def consolidate(df: pd.DataFrame) -> pd.DataFrame:
+    grp = (
+        df.groupby(["ISIN", "Instrument Name"], as_index=False)
+        .agg(
+            Total_Qty       = ("Logical Position", "sum"),
+            Custodian_Price = ("Market Price", "first"),
+            Num_Clients     = ("Client Name", "nunique"),
+        )
+    )
+    grp["NSE_Ticker"] = grp["ISIN"].map(get_ticker)
+
+    grp["Clean Name"] = (
+        grp["Instrument Name"]
+        .str.replace(r"\s+EQ\s*$",           "",    regex=True)
+        .str.replace(r"\s+EQ\s+FV.*$",       "",    regex=True)
+        .str.replace(r"\s+FV\s+.*$",         "",    regex=True)
+        .str.replace(r"\s+FV[0-9].*$",       "",    regex=True)
+        .str.replace(r"\s+UNLISTED$",        "",    regex=True)
+        .str.replace(r"\bLIMITED\b",         "LTD", regex=True)
+        .str.replace(r"EQ NEW FV RE\..*$",   "",    regex=True)
+        .str.strip()
+    )
+    return grp.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# MARKET DATA
+# ─────────────────────────────────────────────────────────────
+
+# Shared nsetools session — reused across calls rather than creating a
+# new one per stock, to be a reasonably well-behaved client of NSE's site.
+_nse_client = None
+def _get_nse_client():
+    global _nse_client
+    if _nse_client is None and NSETOOLS_AVAILABLE:
+        _nse_client = Nse()
+    return _nse_client
+
+
+# ── BSE-direct quotes — now the HIGHEST-priority price source ──
+#
+# WHY: nsetools (NSE-direct) turned out to be blocked entirely when
+# deployed on Streamlit Cloud — 0/40 quotes succeeded, all falling back
+# to yfinance. This is a known, common issue: NSE's site actively blocks
+# requests from cloud/datacenter IP ranges, even though the exact same
+# code works fine from a home connection.
+#
+# BSE's site, by contrast, has been used ALL SESSION for filings (via
+# this same `bse` library) from this exact Streamlit Cloud deployment,
+# with zero blocking issues reported. That's real, already-proven
+# evidence this specific data source works from this specific
+# infrastructure — unlike nsetools, which we only just found out is
+# blocked. So BSE-direct quotes are now tried FIRST, before nsetools,
+# before the yfinance-derived fallback.
+_bse_isin_cache: dict = {}   # per-ISIN cache: ISIN -> scripcode (only successes cached)
+_bse_quote_client = None
+
+def _get_bse_scripcode(isin: str):
+    """
+    Resolve ONE stock's BSE scripcode via bse.lookup(isin) — a targeted,
+    per-stock endpoint — INSTEAD OF the old approach of building one
+    giant ISIN->scripcode map via bse.listSecurities(group="") for the
+    entire BSE universe in a single bulk call.
+
+    WHY THIS CHANGED: production logs showed that bulk call failing with
+    a JSON parse error ("Expecting value: line 3 column 1") for HOURS,
+    which took down price fetching for ALL 40 stocks at once — a single
+    point of failure. lookup() hits a different, lighter-weight BSE
+    endpoint per stock, so:
+      - if BSE's bulk securities list has an issue, this is unaffected
+      - if lookup() fails for ONE stock, only that stock is affected —
+        not the other 39
+
+    Cached per-ISIN, and only successes are cached (same non-poisoning
+    principle as before: a failure just isn't cached, so the next call
+    retries fresh rather than being stuck forever).
+    """
+    if not isin:
+        return None
+    isin = isin.strip().upper()
+    if isin in _bse_isin_cache:
+        return _bse_isin_cache[isin]
+    try:
+        from bse import BSE
+        global _bse_quote_client
+        if _bse_quote_client is None:
+            _bse_quote_client = BSE(download_folder="./_bse_tmp")
+        result = _bse_quote_client.lookup(isin)
+        scripcode = result.get("bse_code") if result else None
+        if scripcode:
+            _bse_isin_cache[isin] = scripcode  # only cache success
+        return scripcode
+    except Exception as e:
+        print(f"[app] BSE lookup failed for ISIN {isin}: {e}")
+        return None  # NOT cached — next call will retry
+
+
+def _fetch_bse_quote(isin: str):
+    """
+    Fetch live price + previous close DIRECTLY from BSE, via the SAME
+    `bse` library already proven reliable for filings in this exact
+    deployment. Returns dict with live_price, prev_close, day_chg_pct —
+    or None on failure, so the caller falls back further (nsetools, then
+    the yfinance-derived method).
+    """
+    if not isin:
+        return None
+    scripcode = _get_bse_scripcode(isin)
+    if not scripcode:
+        return None
+    try:
+        global _bse_quote_client
+        if _bse_quote_client is None:
+            from bse import BSE
+            _bse_quote_client = BSE(download_folder="./_bse_tmp")
+        q = _bse_quote_client.quote(scripcode)
+        live_price = q.get("LTP")
+        prev_close = q.get("PrevClose")
+        if live_price is None:
+            return None
+        day_chg = None
+        if prev_close and prev_close > 0:
+            day_chg = (float(live_price) - float(prev_close)) / float(prev_close) * 100
+        return {
+            "live_price":  float(live_price),
+            "prev_close":  float(prev_close) if prev_close else None,
+            "day_chg_pct": day_chg,
+        }
+    except Exception as e:
+        print(f"[app] BSE quote failed for ISIN {isin}: {e}")
+        return None
+
+
+def _fetch_bse_history(isin: str):
+    """
+    12 months of daily closes for one stock, DIRECTLY from BSE
+    (equityPriceVolumeT12M endpoint) — replaces yfinance as the source
+    for close-at-PDF-date and 52W high/low.
+
+    WHY: production logs showed repeated Segmentation faults — hard
+    process-level crashes — with yfinance (whose HTTP stack uses the
+    curl_cffi C-extension) as the only plausible native-code network
+    component in the hot path. Crashes persisted even after removing
+    threading from the yfinance calls. The `bse` library uses plain
+    `requests` (pure-Python, thread-safe, no C-extension HTTP), and has
+    been the one channel that has never failed in this deployment. So
+    ALL per-stock data now comes from BSE, and yfinance is out of the
+    page-load path entirely.
+
+    Returns a pandas Series of closes indexed by datetime (like the old
+    yfinance closes series, so all downstream date logic — close@PDF
+    lookup, 52W range — keeps working unchanged), or None on failure.
+    """
+    if not isin:
+        return None
+    scripcode = _get_bse_scripcode(isin)
+    if not scripcode:
+        return None
+    try:
+        global _bse_quote_client
+        if _bse_quote_client is None:
+            from bse import BSE
+            _bse_quote_client = BSE(download_folder="./_bse_tmp")
+        res = _bse_quote_client.equityPriceVolumeT12M(scripcode)
+        data = res.get("Data") or {}
+        fields = data.get("fields") or []
+        rows = data.get("data") or []
+        if not fields or not rows:
+            return None
+        # Response fields are typically: dttm (datetime), vale1 (close
+        # price), vole (volume) — resolve indices dynamically rather than
+        # assuming positions.
+        try:
+            i_dt = fields.index("dttm")
+        except ValueError:
+            i_dt = 0
+        try:
+            i_px = fields.index("vale1")
+        except ValueError:
+            i_px = 1
+        dates, prices = [], []
+        for row in rows:
+            try:
+                dt = pd.to_datetime(row[i_dt])
+                px = float(row[i_px])
+                if px > 0:
+                    dates.append(dt)
+                    prices.append(px)
+            except Exception:
+                continue
+        if not prices:
+            return None
+        s = pd.Series(prices, index=pd.DatetimeIndex(dates)).sort_index()
+        # Normalise index to date-level (strip any time component) for the
+        # same comparisons the yfinance series supported
+        s.index = s.index.normalize()
+        return s
+    except Exception as e:
+        print(f"[app] BSE history failed for ISIN {isin}: {e}")
+        return None
+
+
+def _fetch_nse_quote(bare_symbol: str):
+    """
+    Fetch live price + day-change DIRECTLY from NSE via nsetools, rather
+    than deriving it ourselves from historical daily-bar data.
+
+    WHY THIS EXISTS: every previous attempt to fix Day Chg % (row
+    indexing, auto_adjust, batching, gap-detection) was working around
+    unreliability in deriving "today vs yesterday" from yfinance's
+    historical daily bars. NSE's own quote endpoint already computes
+    previousClose/change/pChange itself — using it directly removes the
+    entire class of "which row is actually yesterday" bugs, since we're
+    not doing that derivation ourselves anymore.
+
+    bare_symbol: NSE symbol WITHOUT the .NS suffix (e.g. "RELIANCE", not
+    "RELIANCE.NS") — nsetools expects the bare NSE code.
+
+    Returns a dict with live_price, prev_close, day_chg_pct, w52h, w52l —
+    or None entirely on failure, so the caller can fall back to the
+    yfinance-based method for that one stock.
+    """
+    if not NSETOOLS_AVAILABLE:
+        return None
+    try:
+        nse = _get_nse_client()
+        if nse is None:
+            return None
+        q = nse.get_quote(bare_symbol)
+        if not q or "lastPrice" not in q:
+            return None
+
+        live_price = q.get("lastPrice")
+        prev_close = q.get("previousClose")
+        day_chg    = q.get("pChange")  # NSE's own pre-computed % change
+
+        week_hl = q.get("weekHighLow") or {}
+        w52h = week_hl.get("max")
+        w52l = week_hl.get("min")
+
+        if live_price is None:
+            return None
+
+        return {
+            "live_price": float(live_price),
+            "prev_close": float(prev_close) if prev_close is not None else None,
+            "day_chg_pct": float(day_chg) if day_chg is not None else None,
+            "w52h": float(w52h) if w52h is not None else None,
+            "w52l": float(w52l) if w52l is not None else None,
+        }
+    except Exception as e:
+        print(f"[app] nsetools quote failed for {bare_symbol}: {e}")
+        return None
+
+
+def _last_bar_is_today_ist(closes_index) -> bool:
+    """
+    Returns True only if the most recent row in a daily price series
+    genuinely represents TODAY's trading (in IST) — not yesterday's
+    settled close still sitting there because today's bar hasn't
+    populated in Yahoo's feed yet.
+
+    WHY THIS EXISTS — real bug this fixes: fetch_prices/fetch_nifty500
+    used to pick "today's price" and "yesterday's price" by RAW POSITION
+    (closes.iloc[-1], closes.iloc[-2]). During the first few hours after
+    market open, Yahoo sometimes hasn't populated today's bar yet (or it's
+    briefly NaN and silently dropped by .dropna()) — so iloc[-1] was
+    actually still YESTERDAY's close, and iloc[-2] was the day before.
+    The result: "Day Chg %" showed YESTERDAY's move mislabeled as today's,
+    until Yahoo's feed caught up (observed ~1pm) and the indexing
+    naturally lined back up — matching exactly the "wrong all morning,
+    self-corrects around 1 o'clock" symptom.
+
+    Fix: check the ACTUAL DATE of the last row against today's real date
+    (IST) before trusting it as "today's price". If they don't match on a
+    weekday, we know today's bar isn't ready — so we show the last known
+    price without fabricating a day-change number from mismatched days.
+
+    On weekends/holidays, the last row legitimately being a prior trading
+    day (e.g. Friday) is NORMAL and expected, not a bug — so this only
+    withholds day-change when TODAY is a weekday but the bar's date is
+    older than today.
+    """
+    if len(closes_index) == 0:
+        return False
+    ist_now   = datetime.utcnow() + pd.Timedelta(hours=5, minutes=30)
+    ist_today = ist_now.date()
+    is_weekday = ist_today.weekday() < 5  # Mon=0 .. Sun=6
+
+    last_date = closes_index[-1]
+    if hasattr(last_date, "date"):
+        last_date = last_date.date()
+
+    if is_weekday and last_date != ist_today:
+        return False  # today's bar not populated yet — don't trust positional indexing
+    return True
+
+
+def _get_verified_prev_close(closes):
+    """
+    Returns (prev_close_value, prev_close_date) for the trading day
+    immediately before the most recent row — but ONLY if it passes two
+    sanity checks. Returns (None, None) if either looks wrong, so the
+    caller can withhold day-change rather than silently combine multiple
+    days' moves into one number.
+
+    WHY THIS EXISTS — real bug this fixes: the code used to trust
+    closes.iloc[-2] as "yesterday's close" purely by POSITION. But Yahoo's
+    daily-bar data can have a GAP — a missing row for one specific
+    trading day, not just at the very end of the series — especially for
+    volatile / heavily-newsworthy stocks. When that happens, iloc[-2] is
+    actually TWO (or more) trading days back, not one. Confirmed with
+    real numbers on Orchid Pharma: the implied "wrong" reference price
+    matched EXACTLY (to the cent) what its close was two trading days
+    back, not one — Day Chg % was combining two days' moves into one
+    number.
+
+    TWO CHECKS, both applied:
+    1. Calendar gap — if the two closes are more than 5 calendar days
+       apart, that's clearly wrong (even India's longest festival
+       clusters don't create gaps that large).
+    2. Implied magnitude — if the resulting day-change would be
+       implausibly large (>12%), that's ALSO suspicious, independent of
+       whether the gap itself looks "calendar-normal". This matters
+       because India has legitimate mid-week holidays that create small
+       (2-4 day) gaps too — calendar gap alone can't distinguish "holiday"
+       from "missing-data bug" in every case, but a huge implied swing on
+       top of a gap is a strong combined signal something's off.
+
+    This is a pragmatic heuristic, not a perfect fix — a stock genuinely
+    could move >12% in one legitimate session (circuit-limit moves do
+    happen). The trade-off: occasionally withholding a real big move is
+    safer than occasionally showing a fabricated one.
+    """
+    if len(closes) < 2:
+        return None, None
+
+    last_date = closes.index[-1]
+    if hasattr(last_date, "date"):
+        last_date = last_date.date()
+
+    prev_date = closes.index[-2]
+    if hasattr(prev_date, "date"):
+        prev_date = prev_date.date()
+
+    gap_days = (last_date - prev_date).days
+    if gap_days > 5:
+        # Suspicious gap — iloc[-2] is not genuinely "the previous
+        # trading day". Don't use it; caller should withhold day-change.
+        return None, None
+
+    prev_value = float(closes.iloc[-2])
+    live_value = float(closes.iloc[-1])
+    if prev_value > 0:
+        implied_chg = abs((live_value - prev_value) / prev_value * 100)
+        if implied_chg > 12.0:
+            # Implausibly large for a single normal trading day — likely
+            # the gap-based bug even though the calendar gap alone looked
+            # small enough to pass the first check.
+            return None, None
+
+    return prev_value, prev_date
+
+
+@st.cache_data(ttl=0, show_spinner=False)
+def fetch_prices(tickers: list, pdf_anchor_date=None, ticker_to_isin: dict | None = None) -> tuple[dict, dict]:
+    """
+    Simple, reliable price fetch using only daily closes.
+    Works consistently on both local and cloud environments.
+
+    If pdf_anchor_date is provided (datetime/Timestamp), each result also
+    includes 'close_at_pdf_date': the stock's close on that date (or the
+    next available trading day if the PDF date itself was a holiday). This
+    powers the live-adjusted "Return Since Inception" feature in the
+    Client-wise Breakdown — we compare each stock's price today vs. its
+    price on the PDF date to know how much that client's portfolio has
+    moved since the PDF was anchored.
+    """
+    valid = [t for t in tickers if t]
+    if not valid:
+        return {}
+    results = {}
+
+    import concurrent.futures
+
+    # ── Historical closes: now from BSE (equityPriceVolumeT12M), NOT
+    # yfinance. See _fetch_bse_history docstring — production Segmentation
+    # faults persisted even with sequential yfinance calls, and yfinance's
+    # curl_cffi C-extension HTTP stack is the only plausible native-code
+    # crash source in the hot path. The `bse` library (plain `requests`,
+    # pure Python, built-in throttling) has never failed in this
+    # deployment. This series powers close@PDF and 52W range; threading
+    # is safe here because `requests` is thread-safe, and the library's
+    # own throttle prevents request bursts. ──
+    per_ticker_closes = {}
+    if ticker_to_isin:
+        def _fetch_history_for_ticker(ticker):
+            isin = ticker_to_isin.get(ticker)
+            if not isin:
+                return ticker, None
+            return ticker, _fetch_bse_history(isin)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(_fetch_history_for_ticker, t): t for t in valid}
+            for future in concurrent.futures.as_completed(futures):
+                t, closes = future.result()
+                per_ticker_closes[t] = closes
+    _hist_ok = sum(1 for v in per_ticker_closes.values() if v is not None and len(v) > 0)
+    print(f"[app] BSE history: {_hist_ok}/{len(valid)} stocks with 12M closes")
+
+    # ── HIGHEST PRIORITY: BSE-direct quotes ──
+    # See _fetch_bse_quote docstring for the full reasoning — this uses
+    # the same `bse` library already proven reliable for filings in this
+    # exact deployment (unlike nsetools/NSE-direct, which is blocked
+    # entirely from Streamlit Cloud's IP — confirmed 0/40 success rate).
+    # Needs an ISIN per ticker (passed in via ticker_to_isin), since BSE
+    # quotes are looked up by scripcode, not by NSE-style ticker symbol.
+    bse_quotes = {}
+    if ticker_to_isin:
+        def _fetch_bse_for_ticker(ticker):
+            isin = ticker_to_isin.get(ticker)
+            if not isin:
+                return ticker, None
+            return ticker, _fetch_bse_quote(isin)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(_fetch_bse_for_ticker, t): t for t in valid}
+            for future in concurrent.futures.as_completed(futures):
+                t, quote = future.result()
+                bse_quotes[t] = quote
+
+        _bse_succeeded = sum(1 for v in bse_quotes.values() if v is not None)
+        print(f"[app] BSE-direct: {_bse_succeeded}/{len(valid)} quotes succeeded")
+
+    # ── SECONDARY live-quote source: nsetools, direct from NSE ──
+    # DISABLED as of this deploy — confirmed via production logs that NSE
+    # blocks Streamlit Cloud's IP entirely (0/40 quotes ever succeeded).
+    # Running 40 threaded calls that are GUARANTEED to fail was pure
+    # wasted load — real contributing factor to an app crash (resource
+    # exhaustion + it left yfinance's per-ticker fallback carrying more
+    # weight than intended). Kept in code (not deleted) in case NSE ever
+    # stops blocking this infrastructure — flip _NSETOOLS_ENABLED back to
+    # True to re-test.
+    _NSETOOLS_ENABLED = False
+    nse_quotes = {}
+    if NSETOOLS_AVAILABLE and _NSETOOLS_ENABLED:
+        def _fetch_nse_for_ticker(ticker):
+            if not ticker.endswith(".NS"):
+                return ticker, None
+            # Skip if BSE-direct already succeeded for this one — no need
+            # to also hit NSE.
+            if bse_quotes.get(ticker) is not None:
+                return ticker, None
+            bare_symbol = ticker[:-3]  # strip ".NS"
+            return ticker, _fetch_nse_quote(bare_symbol)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_fetch_nse_for_ticker, t): t for t in valid}
+            for future in concurrent.futures.as_completed(futures):
+                t, quote = future.result()
+                nse_quotes[t] = quote
+
+        # Visible-in-logs summary so we don't have to guess whether
+        # nsetools is actually working in production — check Streamlit
+        # Cloud's logs for this line if prices still look off.
+        _succeeded = sum(1 for v in nse_quotes.values() if v is not None)
+        _attempted = sum(1 for t in valid if t.endswith(".NS"))
+        print(f"[app] nsetools: {_succeeded}/{_attempted} NSE quotes succeeded "
+              f"({_attempted - _succeeded} falling back to yfinance-derived values)")
+    else:
+        print("[app] nsetools not available — all prices using yfinance-derived values")
+
+    # Normalise pdf_anchor_date to pandas Timestamp (timezone-naive, midnight)
+    anchor_ts = None
+    if pdf_anchor_date is not None:
+        try:
+            anchor_ts = pd.Timestamp(pdf_anchor_date).normalize()
+        except Exception:
+            anchor_ts = None
+
+    for t in valid:
+        try:
+            closes = per_ticker_closes.get(t)
+            has_history = closes is not None and not closes.empty
+            bse_q = bse_quotes.get(t)
+
+            # A stock with NO history AND NO live quote genuinely has no
+            # data — mark and move on. But a stock with a good live quote
+            # and missing history should still show price/day-change
+            # (just without 52W range / close@PDF), NOT be discarded.
+            if not has_history and (bse_q is None or bse_q.get("live_price") is None):
+                results[t] = None
+                continue
+
+            # ── History-derived baseline (from BSE T12M closes) — used
+            # for 52W range, close@PDF, and as the fallback source for
+            # price/day-change if the live quote failed for this stock.
+            # All guarded: history may legitimately be missing while the
+            # live quote succeeded.
+            #
+            # Latest close counts as today's price ONLY if the date check
+            # confirms today's bar is genuinely present (see
+            # _last_bar_is_today_ist docstring). prev_close is VERIFIED
+            # by date (see _get_verified_prev_close docstring) rather
+            # than trusted by raw position — catches the confirmed bug
+            # where a gap in the data made position -2 actually 2+
+            # trading days back, silently combining two days' moves.
+            live_price = None
+            prev_close = None
+            day_c      = None
+            w52h       = None
+            w52l       = None
+            if has_history:
+                live_price = float(closes.iloc[-1])
+                if _last_bar_is_today_ist(closes.index):
+                    prev_close, _prev_date = _get_verified_prev_close(closes)
+                    if prev_close is not None and prev_close > 0:
+                        day_c = (live_price - prev_close) / prev_close * 100
+                    else:
+                        prev_close = live_price
+                        day_c      = None
+                else:
+                    prev_close = live_price
+                    day_c      = None
+                w52h = float(closes.max())
+                w52l = float(closes.min())
+
+            # ── PRIORITY 1: BSE-direct live quote overrides the
+            # history-derived baseline. This is BSE's own PrevClose/LTP —
+            # see _fetch_bse_quote docstring. (nsetools/PRIORITY 2 is
+            # disabled — blocked from this infrastructure; the gated
+            # block above never populates nse_quotes.) ──
+            if bse_q is not None and bse_q.get("live_price") is not None:
+                live_price = bse_q["live_price"]
+                if bse_q.get("prev_close") is not None:
+                    prev_close = bse_q["prev_close"]
+                if bse_q.get("day_chg_pct") is not None:
+                    day_c = bse_q["day_chg_pct"]
+            elif nse_quotes.get(t) is not None and nse_quotes[t].get("live_price") is not None:
+                nse_q = nse_quotes[t]
+                live_price = nse_q["live_price"]
+                if nse_q.get("prev_close") is not None:
+                    prev_close = nse_q["prev_close"]
+                if nse_q.get("day_chg_pct") is not None:
+                    day_c = nse_q["day_chg_pct"]
+
+            if live_price is None:
+                results[t] = None
+                continue
+            if prev_close is None:
+                prev_close = live_price
+
+            # Close on PDF anchor date — closest trading day at or after
+            # the anchor. Needs history; None if unavailable for this
+            # stock (that client drift contribution is simply skipped
+            # downstream, same as any stock without close@PDF).
+            close_at_pdf = None
+            if anchor_ts is not None and has_history:
+                try:
+                    idx = closes.index
+                    if hasattr(idx, "tz") and idx.tz is not None:
+                        idx = idx.tz_localize(None)
+                        closes_naive = closes.copy()
+                        closes_naive.index = idx
+                    else:
+                        closes_naive = closes
+                    at_or_after = closes_naive[closes_naive.index >= anchor_ts]
+                    if not at_or_after.empty:
+                        close_at_pdf = float(at_or_after.iloc[0])
+                    else:
+                        close_at_pdf = live_price
+                except Exception:
+                    close_at_pdf = None
+
+            results[t] = {
+                "price":            round(live_price, 2),
+                "prev_close":       round(prev_close, 2),
+                "day_chg_pct":      round(day_c, 2) if day_c is not None else None,
+                "w52h":             round(w52h, 2) if w52h is not None else None,
+                "w52l":             round(w52l, 2) if w52l is not None else None,
+                "close_at_pdf":     round(close_at_pdf, 2) if close_at_pdf is not None else None,
+            }
+        except Exception:
+            results[t] = None
+    # Diagnostic summary for on-dashboard display (see call site) — avoids
+    # needing to dig through Streamlit Cloud logs to know which price
+    # source is actually working, which caused real friction earlier in
+    # this project's build (a whole detour just to check an API key's
+    # status).
+    _bse_succeeded = sum(1 for v in bse_quotes.values() if v is not None)
+    _nse_succeeded = sum(1 for v in nse_quotes.values() if v is not None) if NSETOOLS_AVAILABLE else 0
+    _nse_attempted = sum(1 for t in valid if t.endswith(".NS"))
+    diagnostic = {
+        "bse_succeeded": _bse_succeeded,
+        "bse_attempted": len(valid) if ticker_to_isin else 0,
+        "nsetools_available": NSETOOLS_AVAILABLE,
+        "nse_succeeded": _nse_succeeded,
+        "nse_attempted": _nse_attempted,
+        "total_stocks": len(valid),
+    }
+    return results, diagnostic
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_benchmark():
+    """
+    Returns (1Y total return %, 1-day return %, live index price).
+    Fetches BSE 500 live price directly from BSE India website,
+    falls back to Yahoo Finance if that fails.
+    """
+    import requests
+
+    # Method 1: Scrape BSE India directly — same source as bseindia.com
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer":    "https://www.bseindia.com/",
+        }
+        url = "https://api.bseindia.com/BseIndiaAPI/api/GetIndexData/w?index=BSE%20500"
+        resp = requests.get(url, headers=headers, timeout=8)
+        data = resp.json()
+        live_price = float(data.get("CurrValue", 0))
+        prev_close = float(data.get("PrevClose", live_price))
+        day        = float(data.get("PerChange", 0))
+        if live_price > 0:
+            # Get 1Y return from Yahoo as fallback for this one metric
+            try:
+                hist = yf.download("BSE-500.BO", period="1y", interval="1d",
+                                   auto_adjust=True, progress=False,
+                                   multi_level_index=False)
+                c1y  = hist["Close"].dropna()
+                total = (live_price - float(c1y.iloc[0])) / float(c1y.iloc[0]) * 100 if len(c1y) > 1 else 0
+            except Exception:
+                total = 0
+            return round(total, 2), round(day, 2), round(live_price, 2)
+    except Exception:
+        pass
+
+    # Method 2: Yahoo Finance fallback
+    for symbol in ["BSE-500.BO", "^BSESN", "^BSE500"]:
+        try:
+            bse_5d = yf.download(symbol, period="5d", interval="1d",
+                                 auto_adjust=True, progress=False,
+                                 multi_level_index=False)
+            c_5d = bse_5d["Close"].dropna()
+            if len(c_5d) < 2:
+                continue
+            live_price = float(c_5d.iloc[-1])
+            prev_close = float(c_5d.iloc[-2])
+            day   = (live_price - prev_close) / prev_close * 100
+            bse_1y = yf.download(symbol, period="1y", interval="1d",
+                                 auto_adjust=True, progress=False,
+                                 multi_level_index=False)
+            c_1y  = bse_1y["Close"].dropna()
+            total = (live_price - float(c_1y.iloc[0])) / float(c_1y.iloc[0]) * 100 if len(c_1y) > 1 else 0
+            return round(total, 2), round(day, 2), round(live_price, 2)
+        except Exception:
+            continue
+
+    return None, None, None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_nifty500(pdf_anchor_date=None):
+    """
+    Fetch S&P BSE 500 index data — DIRECTLY from BSE's index archive
+    (fetchHistoricalIndexData), the same proven-reliable channel now
+    powering everything else. yfinance fully removed from this path
+    (repeated production Segmentation faults traced to its C-extension
+    HTTP stack).
+
+    BONUS of going BSE-direct: this is now the ACTUAL S&P BSE 500 —
+    the exact index your Nuvama PDF anchors reference — not the Nifty
+    500 substitute we used while yfinance's BSE 500 feed was broken.
+    The UI label switches back to "BSE 500" accordingly.
+
+    NOTE: BSE's index archive is END-OF-DAY data. So 'day_chg_pct' here
+    is the last completed session's move (not live intraday), and
+    'move_since_pdf_pct' updates EOD — which is exactly the agreed spec
+    for the since-inception benchmark column. The top-of-page KPI is
+    labelled to reflect this.
+
+    Returns dict with live_price (last EOD close), prev_close,
+    day_chg_pct, close_at_pdf, move_since_pdf_pct — or None on failure.
+    """
+    if not NEWS_MODULE_AVAILABLE:
+        # bse library unavailable — no benchmark rather than a crash
+        return None
+    try:
+        from datetime import date as _date, timedelta as _td
+        global _bse_quote_client
+        if _bse_quote_client is None:
+            from bse import BSE
+            _bse_quote_client = BSE(download_folder="./_bse_tmp")
+
+        to_d   = _date.today()
+        from_d = to_d - _td(days=400)  # ~13 months, covers any PDF anchor
+
+        csv_path = None
+        # Index naming in BSE's archive varies — try known variants and
+        # log which one worked so future debugging is one log-line away.
+        for _idx_name in ("BSE 500", "S&P BSE 500", "BSE500"):
+            try:
+                csv_path = _bse_quote_client.fetchHistoricalIndexData(
+                    _idx_name, from_d, to_d, period="D",
+                    folder="./_bse_tmp",
+                )
+                if csv_path is not None:
+                    print(f"[app] BSE 500 index archive fetched using name '{_idx_name}'")
+                    break
+            except Exception as _e:
+                print(f"[app] BSE index name '{_idx_name}' failed: {_e}")
+                continue
+        if csv_path is None:
+            print("[app] BSE 500 index archive: no name variant worked")
+            return None
+
+        df = pd.read_csv(csv_path)
+        # Find the date and close columns dynamically — archive CSV
+        # headers vary in case/wording ("Date", "Close", "CloseValue"...)
+        cols = {c.lower().strip(): c for c in df.columns}
+        date_col  = next((cols[k] for k in cols if "date" in k), None)
+        close_col = next((cols[k] for k in cols if "close" in k), None)
+        if date_col is None or close_col is None:
+            print(f"[app] BSE 500 CSV columns unrecognised: {list(df.columns)}")
+            return None
+
+        closes = pd.Series(
+            pd.to_numeric(df[close_col], errors="coerce").values,
+            index=pd.to_datetime(df[date_col], errors="coerce", dayfirst=True),
+        ).dropna().sort_index()
+        closes.index = closes.index.normalize()
+        if closes.empty:
+            return None
+
+        live_price = float(closes.iloc[-1])   # last completed EOD close
+        prev_close, _pd_date = _get_verified_prev_close(closes)
+        if prev_close is not None and prev_close > 0:
+            day_chg = (live_price - prev_close) / prev_close * 100
+        else:
+            prev_close = live_price
+            day_chg = None
+
+        close_at_pdf       = None
+        move_since_pdf_pct = None
+        if pdf_anchor_date is not None:
+            try:
+                anchor_ts = pd.Timestamp(pdf_anchor_date).normalize()
+                at_or_after = closes[closes.index >= anchor_ts]
+                if not at_or_after.empty:
+                    close_at_pdf = float(at_or_after.iloc[0])
+                    move_since_pdf_pct = (live_price - close_at_pdf) / close_at_pdf * 100
+            except Exception:
+                pass
+
+        return {
+            "live_price":          round(live_price, 2),
+            "prev_close":          round(prev_close, 2),
+            "day_chg_pct":         round(day_chg, 2) if day_chg is not None else None,
+            "close_at_pdf":        round(close_at_pdf, 2) if close_at_pdf is not None else None,
+            "move_since_pdf_pct":  round(move_since_pdf_pct, 2) if move_since_pdf_pct is not None else None,
+        }
+    except Exception as e:
+        print(f"[app] BSE 500 index fetch failed: {e}")
+        return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_history(ticker: str, period: str = "1y") -> pd.DataFrame:
+    """Fetch OHLCV. Uses 1m interval for 1D, 5m for 5D, daily for rest."""
+    interval_map = {
+        "1d":  "1m",
+        "5d":  "5m",
+        "1mo": "1d",
+        "3mo": "1d",
+        "6mo": "1d",
+        "1y":  "1d",
+        "5y":  "1wk",
+        "max": "1mo",
+    }
+    interval = interval_map.get(period, "1d")
+    try:
+        df = yf.download(ticker, period=period, interval=interval,
+                         auto_adjust=True, progress=False,
+                         multi_level_index=False)
+        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    except Exception:
+        return pd.DataFrame()
+
+
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
+def fmt_inr(v):
+    if v >= 1e7:  return f"₹{v/1e7:.2f} Cr"
+    if v >= 1e5:  return f"₹{v/1e5:.2f} L"
+    return f"₹{v:,.0f}"
+
+def style_pnl(v):
+    if pd.isna(v): return ""
+    return f"color: {'#3ddc84' if v >= 0 else '#ff5c5c'}; font-weight: 600"
+
+def style_alloc(v):
+    if pd.isna(v): return ""
+    alpha = min(v / 12, 1.0)  # normalise: 12% = full colour
+    return f"background-color: rgba(91,141,239,{alpha:.2f}); color: #0a0e14; font-weight:600"
+
+
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(
+        '<div style="font-family: \'IBM Plex Mono\', monospace; font-size: 0.78rem; '
+        'font-weight: 700; letter-spacing: 0.1em; color: #6b7a90; margin-bottom: 2px;">'
+        'AVERRA</div>'
+        '<div style="font-size: 1.1rem; font-weight: 700; color: #e8ecf1; margin-bottom: 8px;">'
+        'Portfolio Dashboard</div>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    # ── Auto-load: works both locally AND on Streamlit Cloud ──
+    import os, glob
+
+    def _is_master(fname):
+        n = os.path.basename(str(fname)).upper()
+        return "MASTER" in n or "MODEL" in n
+
+    def _find_files():
+        """Find all Excel files — checks local folder first, then cloud (repo root)."""
+        import re
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Local: sort by modification time (most recent first)
+        local = sorted(
+            glob.glob(os.path.join(script_dir, "*.xlsx")) +
+            glob.glob(os.path.join(script_dir, "*.xls")),
+            key=os.path.getmtime, reverse=True,
+        )
+        if local:
+            return local, "local"
+        # Cloud: sort by date in filename (DD-MM-YYYY pattern) — most recent first
+        # Falls back to reverse alphabetical if no date found
+        def _file_sort_key(fname):
+            base = os.path.basename(fname).upper()
+            # Extract date from filename like "AS ON 05-06-2026"
+            m = re.search(r"(\d{2})-(\d{2})-(\d{4})", base)
+            if m:
+                d, mo, y = m.group(1), m.group(2), m.group(3)
+                return f"{y}{mo}{d}"  # YYYYMMDD → sorts correctly
+            return base  # fallback
+        cloud = sorted(
+            [f for f in os.listdir(".") if f.endswith((".xlsx", ".xls"))],
+            key=_file_sort_key, reverse=True,  # most recent date first
+        )
+        return cloud, "cloud"
+
+    all_files, file_source = _find_files()
+
+    nuvama_files = [f for f in all_files if not _is_master(f)]
+    master_files = [f for f in all_files if _is_master(f)]
+
+    uploaded    = nuvama_files[0] if nuvama_files else None
+    master_file = master_files[0] if master_files else None
+
+    # Show which files are loaded with their actual filenames
+    st.caption(f"📂 Source: {'Local folder' if file_source == 'local' else 'GitHub repo'}")
+    if all_files:
+        st.caption("Files found: " + " | ".join([os.path.basename(str(f)) for f in all_files]))
+
+    if uploaded:
+        st.success(f"✅ Holdings: {os.path.basename(str(uploaded))}")
+    if master_file:
+        st.success(f"✅ Master Portfolio: {os.path.basename(str(master_file))}")
+    else:
+        st.warning("⚠️ Master_Model_Portfolio.xlsx not found in repo — upload it to GitHub.")
+
+    if st.button("Reload Files"):
+        # Clear ALL cache including file cache
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        # Reset session so files are re-read from disk
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+    if not uploaded:
+        st.warning("No holdings Excel found — please upload to GitHub.")
+
+    st.divider()
+    st.markdown("### ➕ Manage Tickers")
+    st.caption("New stock showing no price? Add it here.")
+
+    with st.form("add_ticker_form", clear_on_submit=True):
+        new_isin   = st.text_input("ISIN", placeholder="e.g. INE15B701018")
+        new_ticker = st.text_input("NSE/BSE Symbol", placeholder="e.g. PINELABS")
+        new_exch   = st.radio("Exchange", ["NSE", "BSE"], horizontal=True)
+        submitted  = st.form_submit_button("✅ Save Ticker")
+        if submitted:
+            if new_isin.strip() and new_ticker.strip():
+                saved, warning_msg = save_custom_ticker(new_isin, new_ticker, new_exch)
+                st.session_state["_ticker_save_success"] = f"Saved: {new_isin.strip()} → {saved}"
+                st.session_state["_ticker_save_warning"] = warning_msg
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("Please fill in both ISIN and Symbol.")
+
+    # Show the result of the last save AFTER the rerun — st.rerun() above
+    # wipes any message shown before it, so persist via session_state and
+    # display once here, then clear so it doesn't repeat on next rerun.
+    if st.session_state.get("_ticker_save_success"):
+        st.success(st.session_state.pop("_ticker_save_success"))
+    if st.session_state.get("_ticker_save_warning"):
+        st.warning(st.session_state.pop("_ticker_save_warning"))
+
+    custom_map = load_custom_tickers()
+    if custom_map:
+        st.caption("**Saved custom tickers:**")
+        for isin, ticker in list(custom_map.items()):
+            c1, c2 = st.columns([3, 1])
+            c1.caption(f"`{isin}` → `{ticker}`")
+            if c2.button("🗑", key=f"del_{isin}"):
+                delete_custom_ticker(isin)
+                st.cache_data.clear()
+                st.rerun()
+
+    st.divider()
+    # Chart period is selected via buttons on the chart itself
+    st.divider()
+    if st.button("Refresh prices"):
+        st.cache_data.clear()
+        st.session_state["_do_news_topup"] = True  # also check for new news/filings
+        st.rerun()
+    st.caption(f"Last loaded: {datetime.now().strftime('%d %b %Y %H:%M')}")
+
+
+# ─────────────────────────────────────────────────────────────
+# AUTO-REFRESH
+# ─────────────────────────────────────────────────────────────
+# Cache clears automatically via TTL — no session state needed
+
+st.caption(f"🕐 Prices update on every page load  |  Last loaded: {datetime.now().strftime('%d %b %Y %H:%M')}  |  Press F5 to refresh")
+
+# ─────────────────────────────────────────────────────────────
+# LANDING
+# ─────────────────────────────────────────────────────────────
+if uploaded is None:
+    st.title("Averra Portfolio Dashboard")
+    st.warning(
+        "⚠️ No Excel file found. Place your **Nuvama Statement of Holding** Excel file "
+        "in the same folder as `app.py`, then refresh the page."
+    )
+    st.stop()
+
+
+# ─────────────────────────────────────────────────────────────
+# PARSE + CONSOLIDATE
+# ─────────────────────────────────────────────────────────────
+with st.spinner("Parsing Excel…"):
+    raw_df   = parse_nuvama_excel(uploaded)
+    port_df  = consolidate(raw_df)
+    master_df = parse_master_portfolio(master_file)
+
+n_clients = raw_df["Client Name"].nunique()
+n_stocks  = len(port_df)
+
+
+# ─────────────────────────────────────────────────────────────
+# AUTO-DETECT MISSING TICKERS
+# ─────────────────────────────────────────────────────────────
+def _guess_ticker(name: str):
+    """Guess Yahoo Finance ticker from company name — tries NSE then BSE."""
+    clean = (name.upper()
+             .replace(" LIMITED","").replace(" LTD","")
+             .replace(" PRIVATE","").replace(" PVT","")
+             .replace(" CORPORATION","").replace(" CORP","")
+             .replace(" FINANCE","").replace(" FINANCIAL","")
+             .replace(" TECHNOLOGIES","").replace(" TECH","")
+             .replace(" INDUSTRIES","").replace(" IND","")
+             .replace(" PHARMACEUTICALS","").replace(" PHARMA","")
+             .replace(" SOLUTIONS","").replace(" SERVICES","")
+             .replace(" INDIA","").replace(" HOLDINGS","")
+             .replace("-","").replace(" ","").strip())
+    for suffix in [".NS", ".BO"]:
+        try:
+            t = f"{clean}{suffix}"
+            hist = yf.download(t, period="5d", interval="1d",
+                               auto_adjust=True, progress=False,
+                               multi_level_index=False)
+            if not hist.empty and len(hist["Close"].dropna()) > 0:
+                return t
+        except Exception:
+            continue
+    return None
+
+missing = port_df["NSE_Ticker"].isna()
+if missing.any():
+    # yfinance-based _guess_ticker REMOVED from this path (last remaining
+    # page-load yfinance trigger — the segfault source). Prices are now
+    # keyed off ISIN via BSE anyway, so an unmapped stock just needs ANY
+    # non-null ticker string to enter the pricing flow; if its ISIN
+    # resolves via BSE's per-stock lookup, assign a synthetic "ISIN.BSE"
+    # marker. Stocks whose ISIN isn't on BSE stay flagged in the
+    # broken-ticker helper for manual mapping, same as before.
+    with st.spinner("Resolving new stocks via BSE…"):
+        for idx, row in port_df[missing].iterrows():
+            _isin = str(row.get("ISIN", "")).strip().upper()
+            if _isin and _get_bse_scripcode(_isin):
+                port_df.at[idx, "NSE_Ticker"] = f"{_isin}.BSE"
+
+# ─────────────────────────────────────────────────────────────
+# DETECT FACTSHEET PDF (early — anchor date is needed by price fetch)
+# ─────────────────────────────────────────────────────────────
+# This block runs BEFORE fetch_prices so the PDF's "As of" date can be
+# passed in, enabling each ticker to capture its close on PDF date —
+# which the Client-wise Breakdown uses for live-adjusted return drift.
+# Cash + performance data are parsed below in their respective sections.
+import glob as _glob
+
+_repo_dir = _os_cfg.path.dirname(_os_cfg.path.abspath(__file__))
+_factsheet_candidates = (
+    _glob.glob(_os_cfg.path.join(_repo_dir, "*PortFolioFactSheet*.pdf"))
+    + _glob.glob(_os_cfg.path.join(_repo_dir, "*PortfolioFactSheet*.pdf"))
+    + _glob.glob(_os_cfg.path.join(_repo_dir, "*portfoliofactsheet*.pdf"))
+)
+_factsheet_candidates = list(dict.fromkeys(_factsheet_candidates))
+
+_factsheet_pdf_path = None
+_pdf_as_of_date = None
+if _factsheet_candidates:
+    _factsheet_pdf_path = max(_factsheet_candidates, key=_os_cfg.path.getmtime)
+    print(f"[app] Using factsheet PDF: {_os_cfg.path.basename(_factsheet_pdf_path)}")
+    if len(_factsheet_candidates) > 1:
+        print(f"[app] Note: {len(_factsheet_candidates)} factsheet PDFs found; using most recent.")
+    try:
+        import cash_parser as _cp_early
+        _pdf_as_of_date = _cp_early.get_pdf_as_of_date(_factsheet_pdf_path)
+        if _pdf_as_of_date:
+            print(f"[app] PDF anchor date: {_pdf_as_of_date.date()}")
+    except Exception as _e:
+        print(f"[app] Could not read PDF anchor date: {_e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# FETCH PRICES
+# ─────────────────────────────────────────────────────────────
+tickers = port_df["NSE_Ticker"].dropna().unique().tolist()
+
+# ticker -> ISIN mapping, needed for BSE-direct quote lookups (which are
+# keyed by ISIN/scripcode, not by NSE-style ticker symbol).
+_ticker_isin_df = port_df[port_df["NSE_Ticker"].notna()][["NSE_Ticker", "ISIN"]].drop_duplicates()
+ticker_to_isin = dict(zip(_ticker_isin_df["NSE_Ticker"], _ticker_isin_df["ISIN"]))
+
+with st.spinner(f"Fetching live prices for {len(tickers)} stocks…"):
+    price_data, _price_diagnostic = fetch_prices(
+        tickers, pdf_anchor_date=_pdf_as_of_date, ticker_to_isin=ticker_to_isin
+    )
+    # fetch_benchmark() call removed — it was yfinance-based (the segfault
+    # source being eliminated) and its outputs fed only legacy, undisplayed
+    # variables. The displayed benchmark/alpha uses nifty500_data (BSE 500).
+    bse_ret, bse_day, bse_price   = None, None, None
+    nifty500_data                 = fetch_nifty500(pdf_anchor_date=_pdf_as_of_date)
+
+# Visible status line — see _fetch_bse_quote/_fetch_nse_quote/fetch_prices
+# docstrings for the full priority order (BSE-direct first, nsetools
+# second, yfinance-derived as final fallback) and why. This avoids
+# needing to hunt through Streamlit Cloud's logs to know whether it's
+# actually working, same reasoning as the earlier "Relevance filter:
+# ON/OFF" indicator for the news system.
+_total   = _price_diagnostic.get("total_stocks", 0)
+_bse_ok  = _price_diagnostic.get("bse_succeeded", 0)
+_nse_ok  = _price_diagnostic.get("nse_succeeded", 0)
+_covered = _bse_ok + _nse_ok  # stocks covered by a direct-quote source (BSE or NSE)
+
+if _total > 0:
+    _pct = _covered / _total * 100
+    if _pct >= 80:
+        st.caption(f"🟢 Live prices: {_bse_ok} direct from BSE, {_nse_ok} from NSE, "
+                   f"rest via fallback ({_total} total)")
+    elif _pct > 0:
+        st.caption(f"🟡 Live prices: {_bse_ok} direct from BSE, {_nse_ok} from NSE, "
+                   f"rest via fallback — check logs if this stays low ({_total} total)")
+    else:
+        st.caption(f"🔴 Both BSE-direct and NSE-direct quote sources failed for all stocks — "
+                   f"using fallback method for everything")
+else:
+    st.caption("🔴 No stocks to price.")
+
+
+
+# ─────────────────────────────────────────────────────────────
+# ENRICH
+# ─────────────────────────────────────────────────────────────
+def gf(row, field):
+    t = row["NSE_Ticker"]
+    if t and price_data.get(t):
+        return price_data[t].get(field)
+    return None
+
+port_df["Live Price"] = port_df.apply(lambda r: gf(r, "price"),       axis=1)
+port_df["Prev Close"] = port_df.apply(lambda r: gf(r, "prev_close"),  axis=1)
+port_df["Day Chg %"]  = port_df.apply(lambda r: gf(r, "day_chg_pct"), axis=1)
+port_df["52W High"]   = port_df.apply(lambda r: gf(r, "w52h"),        axis=1)
+port_df["52W Low"]    = port_df.apply(lambda r: gf(r, "w52l"),        axis=1)
+port_df["Close@PDF"]  = port_df.apply(lambda r: gf(r, "close_at_pdf"), axis=1)
+
+port_df["Price Used"]   = port_df["Live Price"].combine_first(port_df["Custodian_Price"])
+port_df["Market Value"] = port_df["Total_Qty"] * port_df["Price Used"]
+port_df["Cust Value"]   = port_df["Total_Qty"] * port_df["Custodian_Price"]
+
+# ── Merge Master Portfolio data ───────────────────────────────────────────
+if not master_df.empty:
+    port_df = port_df.merge(master_df, on="ISIN", how="left")
+else:
+    port_df["FY27_EPS"]     = None
+    port_df["FY28_EPS"]     = None
+    port_df["Target_FY27"]  = None
+    port_df["Target_FY28"]  = None
+
+# ── Calculated columns (live price driven) ───────────────────────────────
+lp = port_df["Live Price"]
+
+port_df["FY27_PE"] = (lp / port_df["FY27_EPS"]).where(
+    port_df["FY27_EPS"].notna() & (port_df["FY27_EPS"] > 0), None)
+
+port_df["FY28_PE"] = (lp / port_df["FY28_EPS"]).where(
+    port_df["FY28_EPS"].notna() & (port_df["FY28_EPS"] > 0), None)
+
+port_df["Upside_FY27"] = ((port_df["Target_FY27"] / lp) - 1) * 100
+port_df["Upside_FY28"] = ((port_df["Target_FY28"] / lp) - 1) * 100
+
+# IRR: CAGR from today to 31 March 2028
+from datetime import date
+today    = date.today()
+exit_date= date(2028, 3, 31)
+years    = (exit_date - today).days / 365.25
+if years > 0:
+    port_df["IRR_FY28"] = ((port_df["Target_FY28"] / lp) ** (1 / years) - 1) * 100
+else:
+    port_df["IRR_FY28"] = None
+
+# ─────────────────────────────────────────────────────────────
+# CASH COMPONENT (from Nuvama PortFolioFactSheet PDF)
+# ─────────────────────────────────────────────────────────────
+# The holding-statement Excel omits cash. The factsheet PDF, sitting in
+# the same GitHub folder, provides per-client Cash + Dividend/Interest
+# receivable. We add those into total AUM so allocations reflect reality
+# (cash dilutes every stock's %), and 1-Day Return is weighted such that
+# the cash portion contributes 0%.
+#
+# If the PDF is missing/unparseable, app degrades to Excel-only (the
+# behaviour before this feature existed) with a visible warning. It
+# never crashes.
+try:
+    import cash_parser
+
+    if _factsheet_pdf_path:
+        cash_by_client = cash_parser.parse_cash_per_client(_factsheet_pdf_path)
+        firm_cash_total = sum(d["total"] for d in cash_by_client.values())
+        # Also pull per-client performance anchors for the Client-wise Breakdown
+        perf_by_client = cash_parser.parse_performance_per_client(_factsheet_pdf_path)
+    else:
+        cash_by_client = {}
+        firm_cash_total = 0
+        perf_by_client = {}
+except Exception as _cash_err:
+    print(f"[app] Could not load cash/perf data: {_cash_err}")
+    cash_by_client = {}
+    firm_cash_total = 0
+    perf_by_client = {}
+
+stock_market_total = port_df["Market Value"].sum()
+total_market = stock_market_total + firm_cash_total  # corrected AUM includes cash
+
+# ── % Allocation (now relative to AUM including cash) ─────────
+port_df["% Alloc"] = (port_df["Market Value"] / total_market * 100).round(2)
+port_df = port_df.sort_values("% Alloc", ascending=False).reset_index(drop=True)
+
+# ── Price source label ────────────────────────────────────────
+def price_src(row):
+    if pd.notna(row["Live Price"]):    return "✅ Live"
+    if row["NSE_Ticker"] is None:      return "🔒 Unlisted"
+    return "⚠️ Check ticker"
+
+port_df["Price Source"] = port_df.apply(price_src, axis=1)
+
+# ── Totals ────────────────────────────────────────────────────
+total_cust    = port_df["Cust Value"].sum()
+total_pnl     = total_market - total_cust
+total_pnl_pct = total_pnl / total_cust * 100 if total_cust else 0
+
+# 1-Day Return: cash holdings contribute 0% by definition. We weight stock
+# day-changes by their share of TOTAL AUM (not just stock AUM), so the
+# cash portion correctly dilutes the headline figure downward.
+valid_day    = port_df[port_df["Day Chg %"].notna() & (port_df["Market Value"] > 0)]
+port_day_ret = 0.0
+if not valid_day.empty and total_market > 0:
+    w = valid_day["Market Value"] / total_market   # denominator includes cash
+    port_day_ret = (w * valid_day["Day Chg %"]).sum()
+
+# 1-year alpha (overall P&L vs BSE500 1Y return)
+alpha_1y  = (total_pnl_pct - bse_ret)  if bse_ret  is not None else None
+# 1-day alpha  = portfolio day return minus BSE500 day return
+alpha_1d  = (port_day_ret  - bse_day)  if bse_day  is not None else None
+
+n_live   = port_df["Live Price"].notna().sum()
+n_miss   = port_df["Live Price"].isna().sum()
+
+
+# ─────────────────────────────────────────────────────────────
+# HEADER
+# ─────────────────────────────────────────────────────────────
+hdr_l, hdr_r = st.columns([5, 1])
+with hdr_l:
+    st.markdown(
+        '<div style="font-size: 2rem; font-weight: 800; color: #e8ecf1; '
+        'letter-spacing: -0.02em; font-family: \'Inter\', sans-serif;">'
+        'Averra Portfolio Dashboard</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div style="font-family: \'IBM Plex Mono\', monospace; font-size: 0.78rem; '
+        f'color: #6b7a90; margin-top: 4px;">'
+        f'AVERRA ASSET MANAGERS LLP &nbsp;·&nbsp; {n_clients} CLIENTS &nbsp;·&nbsp; '
+        f'{n_stocks} STOCKS &nbsp;·&nbsp; {n_live} LIVE &nbsp;·&nbsp; {n_miss} UNLISTED</div>',
+        unsafe_allow_html=True,
+    )
+with hdr_r:
+    import os as _os
+    import base64 as _b64
+    _logo_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "averra_logo.png")
+    if _os.path.exists(_logo_path):
+        with open(_logo_path, "rb") as _f:
+            _logo_b64 = _b64.b64encode(_f.read()).decode()
+        # Logo is navy-on-transparent — invisible against the dark header.
+        # Sit it on a small light card so its original colors stay legible.
+        st.markdown(f"""
+        <div style="
+            background: #f4f1ea;
+            border-radius: 8px;
+            padding: 10px 14px;
+            display: inline-block;
+            float: right;
+        ">
+            <img src="data:image/png;base64,{_logo_b64}" width="110" />
+        </div>
+        """, unsafe_allow_html=True)
+st.divider()
+
+
+# ─────────────────────────────────────────────────────────────
+# KPI CARDS
+# ─────────────────────────────────────────────────────────────
+# 4 columns: Total AUM | 1-Day Return | BSE 500 (last close) | 1-Day Alpha
+# Nifty 500 + Alpha will show "—" if yfinance can't reach ^CRSLDX for
+# whatever reason; we don't degrade the main AUM/return display.
+k1, k2, k3, k4 = st.columns(4)
+
+k1.metric("Total AUM",        fmt_inr(total_market))
+k2.metric("My 1-Day Return",  f"{port_day_ret:+.2f}%", delta_color="off")
+
+if nifty500_data and nifty500_data.get("day_chg_pct") is not None:
+    _nifty_day = nifty500_data["day_chg_pct"]
+    k3.metric("BSE 500 (last close)", f"{_nifty_day:+.2f}%", delta_color="off")
+    _alpha_1d = port_day_ret - _nifty_day
+    k4.metric("1-Day Alpha (vs BSE 500)", f"{_alpha_1d:+.2f}%", delta_color="off")
+else:
+    k3.metric("BSE 500 (last close)", "—")
+    k4.metric("1-Day Alpha (vs BSE 500)", "—")
+
+st.divider()
+
+
+# ─────────────────────────────────────────────────────────────
+# HOLDINGS TABLE
+# ─────────────────────────────────────────────────────────────
+st.markdown(
+    '<div class="section-title">Consolidated Holdings — Portfolio Level</div>',
+    unsafe_allow_html=True,
+)
+
+disp = port_df[[
+    "Clean Name", "% Alloc",
+    "Live Price", "Day Chg %",
+    "IRR_FY28",
+    "FY27_PE",  "FY28_PE",
+    "ISIN", "Total_Qty",
+    "Market Value",
+    "FY27_EPS", "FY28_EPS",
+    "Target_FY27", "Upside_FY27",
+    "Target_FY28", "Upside_FY28",
+]].copy()
+
+disp.columns = [
+    "Stock", "% Alloc",
+    "Live Price", "Day Chg %",
+    "IRR to Mar'28",
+    "FY27 PE",  "FY28 PE",
+    "ISIN", "Total Qty",
+    "Market Value",
+    "FY27 EPS", "FY28 EPS",
+    "Mar'27 Target", "Mar'27 Upside %",
+    "Mar'28 Target", "Mar'28 Upside %",
+]
+
+fp  = lambda x: f"₹{x:,.2f}"  if pd.notna(x) else "–"
+fc  = lambda x: f"{x:+.2f}%"   if pd.notna(x) else "–"
+fa  = lambda x: f"{x:.2f}%"    if pd.notna(x) else "–"
+fv  = lambda x: f"₹{x:,.0f}"  if pd.notna(x) else "–"
+fpe = lambda x: f"{x:.1f}x"   if pd.notna(x) else "–"
+fup = lambda x: f"{x:+.1f}%"  if pd.notna(x) else "–"
+
+def style_upside(v):
+    if pd.isna(v): return ""
+    return f"color: {'#3ddc84' if v >= 0 else '#ff5c5c'}; font-weight:600"
+
+styled = (
+    disp.style
+    .map(style_alloc,  subset=["% Alloc"])
+    .map(style_pnl,    subset=["Day Chg %"])
+    .map(style_upside, subset=["Mar'27 Upside %", "Mar'28 Upside %", "IRR to Mar'28"])
+    .format({
+        "Total Qty":        "{:,.0f}",
+        "% Alloc":          fa,
+        "Live Price":       fp,
+        "Day Chg %":        fc,
+        "Market Value":     fv,
+        "FY27 EPS":         lambda x: f"{x:.2f}" if pd.notna(x) else "–",
+        "FY28 EPS":         lambda x: f"{x:.2f}" if pd.notna(x) else "–",
+        "FY27 PE":          fpe,
+        "FY28 PE":          fpe,
+        "Mar'27 Target":    fp,
+        "Mar'27 Upside %":  fup,
+        "Mar'28 Target":    fp,
+        "Mar'28 Upside %":  fup,
+        "IRR to Mar'28":    fup,
+    }, na_rep="–")
+)
+
+holdings_event = st.dataframe(
+    styled, width="stretch", hide_index=True, height=520,
+    on_select="rerun", selection_mode="single-row", key="holdings_table",
+)
+
+# ── Cash & Equivalents summary line — shown directly below the holdings
+# table so cash AUM/contribution is always visible. NOT inside the table
+# itself because cash has no ISIN/EPS/PE/etc. and would break the row
+# selection + Styler logic. ──
+if firm_cash_total > 0:
+    cash_pct = (firm_cash_total / total_market * 100) if total_market else 0
+    st.markdown(
+        f'<div style="background:#141a24; border:1px solid #232b38; '
+        f'border-left: 3px solid #6b7a90; border-radius:4px; '
+        f'padding:10px 16px; margin-top:8px; font-family:\'IBM Plex Mono\', monospace; '
+        f'font-size:0.85rem; color:#e8ecf1;">'
+        f'<b>Cash &amp; Equivalents</b> '
+        f'<span style="float:right;">'
+        f'₹{firm_cash_total:,.0f} &nbsp;·&nbsp; {cash_pct:.2f}% of AUM'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+elif cash_by_client == {}:
+    # PDF either missing or couldn't be parsed — make this visible, not silent.
+    st.caption(
+        "⚠️ Cash component not loaded. Upload the Nuvama factsheet PDF (any file "
+        "with `PortFolioFactSheet` in the name) to GitHub alongside the Excel to "
+        "include cash in AUM."
+    )
+
+# Capture which stock (if any) was clicked — drives the news feed below.
+# disp.index lines up with the styled/displayed dataframe's row order.
+_clicked_rows = holdings_event.get("selection", {}).get("rows", []) if holdings_event else []
+clicked_stock_name = disp.iloc[_clicked_rows[0]]["Stock"] if _clicked_rows else None
+clicked_stock_isin = disp.iloc[_clicked_rows[0]]["ISIN"] if _clicked_rows else None
+
+# ─────────────────────────────────────────────────────────────
+# STOCK -> CLIENT HOLDINGS BREAKDOWN
+# ─────────────────────────────────────────────────────────────
+# Separate, independent control from the news-filter row-selection above.
+# A dropdown rather than a second in-table checkbox — st.dataframe's
+# selection modes don't reliably combine (row + cell selection together
+# is unsupported on this Streamlit version), so this uses a plain,
+# reliable widget instead of risking that same fragility here.
+#
+# Shows, for any chosen stock, every client who holds it and what % of
+# THAT CLIENT'S OWN portfolio it represents — i.e. who's over/under
+# indexed to this name relative to their own book, not the firm's AUM.
+# Pulled directly from the raw holding statement (raw_df), same as the
+# Client-wise Breakdown drill-down above.
+
+stock_options = ["— Select a stock —"] + disp["Stock"].tolist()
+picked_stock = st.selectbox("Show client holdings for:", stock_options, key="stock_client_picker")
+
+if picked_stock != "— Select a stock —":
+    picked_isin = disp.loc[disp["Stock"] == picked_stock, "ISIN"].iloc[0]
+
+    holders = raw_df[raw_df["ISIN"] == picked_isin].copy()
+    holders = holders[holders["Portfolio Value Client Currency"] != 0]
+
+    if holders.empty:
+        st.info(f"No clients currently hold {picked_stock}.")
+    else:
+        # For each client who holds this stock, need that stock's value as
+        # a % of THAT CLIENT'S total book — so total each client's full
+        # portfolio value separately, then join back.
+        client_totals = (
+            raw_df[raw_df["Portfolio Value Client Currency"] != 0]
+            .groupby("Client Name")["Portfolio Value Client Currency"]
+            .sum()
+            .rename("Client_Total")
+        )
+
+        holder_summary = (
+            holders.groupby("Client Name", as_index=False)["Portfolio Value Client Currency"]
+            .sum()
+            .rename(columns={"Portfolio Value Client Currency": "Stock_Value"})
+        )
+        holder_summary = holder_summary.merge(client_totals, on="Client Name", how="left")
+        holder_summary["% of Client Portfolio"] = (
+            holder_summary["Stock_Value"] / holder_summary["Client_Total"] * 100
+        ).round(2)
+        holder_summary = holder_summary.sort_values("% of Client Portfolio", ascending=False)
+
+        disp_holders = holder_summary[["Client Name", "Stock_Value", "% of Client Portfolio"]].copy()
+        disp_holders["Stock_Value"] = disp_holders["Stock_Value"].map(lambda x: f"₹{x:,.0f}")
+        disp_holders["% of Client Portfolio"] = disp_holders["% of Client Portfolio"].map(lambda x: f"{x:.2f}%")
+        disp_holders = disp_holders.rename(columns={"Stock_Value": "Holding Value"})
+
+        st.markdown(f"**{picked_stock} — held by {len(disp_holders)} client(s)**")
+        st.dataframe(disp_holders, width="stretch", hide_index=True)
+
+# ── Broken ticker helper ───────────────────────────────────────
+broken = port_df[
+    (port_df["NSE_Ticker"].notna()) & (port_df["Live Price"].isna())
+]
+if not broken.empty:
+    with st.expander(f"⚠️ {len(broken)} ticker(s) not resolving — click to see & fix"):
+        st.markdown(
+            "These stocks have a ticker assigned but Yahoo Finance returned no price. "
+            "Verify the symbol at [nseindia.com](https://www.nseindia.com) "
+            "and update `ISIN_TO_NSE` at the top of the script."
+        )
+        st.dataframe(
+            broken[["Clean Name","ISIN","NSE_Ticker"]]
+            .rename(columns={"Clean Name":"Stock","NSE_Ticker":"Ticker (check symbol)"}),
+            width="stretch", hide_index=True,
+        )
+
+st.divider()
+
+
+# ─────────────────────────────────────────────────────────────
+# CLIENT BREAKDOWN
+# ─────────────────────────────────────────────────────────────
+with st.expander("Client-wise Breakdown"):
+    cg_raw = (
+        raw_df.groupby("Client Name", as_index=False)
+        .agg(Stocks=("ISIN","nunique"), Portfolio_Value=("Portfolio Value Client Currency","sum"))
+        .sort_values("Portfolio_Value", ascending=False)
+        .reset_index(drop=True)
+    )
+    cg = cg_raw.copy()
+    cg["% of AUM"]       = (cg["Portfolio_Value"] / cg["Portfolio_Value"].sum() * 100).round(2)
+
+    # ── Per-client live-adjusted return columns ─────────────────────
+    # These three columns sit alongside the static "% of AUM" stat.
+    #
+    # Day Chg %:     Today's weighted-avg move of THAT CLIENT'S stocks.
+    #                Live during market hours; frozen overnight / weekends
+    #                (just reflects the most recent close-to-close move).
+    #
+    # Return Since Inception:
+    #                PDF anchor (TWRR reported in PortFolioFactSheet)
+    #                + cumulative weighted stock move from PDF date to now.
+    #                Live: drifts with intraday stock moves.
+    #                Reset whenever a new PDF is uploaded.
+    #                NOTE: This is an ADDITIVE approximation, matching the
+    #                user-specified model ("if PDF says 29.18% and stocks
+    #                +1%, show 30.18%"). True compounded TWRR would be
+    #                (1.2918 × 1.01) - 1 = 30.45%, slightly higher.
+    #                Used by design — approximation is fine for monitoring,
+    #                and the next PDF resets the anchor anyway.
+    #
+    # Nifty 500 Since Inception:
+    #                PDF BSE 500 anchor + cumulative Nifty 500 move since
+    #                PDF date. Nifty 500 substitutes for BSE 500 because
+    #                BSE 500's yfinance feed is unreliable; the two indices
+    #                track closely. Column is labelled "Nifty 500" so it's
+    #                clear what's being shown. EOD update only — no live
+    #                intraday adjustment.
+    def _client_drift_metrics(client_name: str) -> dict:
+        """Compute live-adjusted columns for one client. Returns dict with
+        day_chg_pct, return_since_inception_pct, nifty500_since_inception_pct.
+        Falls back to None for any value that can't be computed (no PDF
+        anchor for this client, no price data for their holdings, etc.)."""
+        rows = port_df.merge(
+            raw_df[raw_df["Client Name"] == client_name][["ISIN","Portfolio Value Client Currency"]]
+                .rename(columns={"Portfolio Value Client Currency": "_client_value"}),
+            on="ISIN", how="inner",
+        )
+        rows = rows[rows["_client_value"] > 0]
+        client_stock_total = rows["_client_value"].sum()
+
+        # Day change — weighted by client's current holding value
+        day_chg = None
+        valid_day = rows[rows["Day Chg %"].notna()]
+        if not valid_day.empty and client_stock_total > 0:
+            w = valid_day["_client_value"] / client_stock_total
+            day_chg = float((w * valid_day["Day Chg %"]).sum())
+
+        # Return since inception — start with PDF anchor, drift with stock moves
+        perf = perf_by_client.get(client_name.upper(), {})
+        pdf_port_anchor = perf.get("portfolio_since_inception")
+        pdf_bse_anchor  = perf.get("bse500_since_inception")
+
+        return_si = None
+        if pdf_port_anchor is not None and client_stock_total > 0:
+            # Weighted stock-level % move from close@PDF to live price
+            valid_drift = rows[rows["Close@PDF"].notna() & rows["Live Price"].notna() & (rows["Close@PDF"] > 0)]
+            if not valid_drift.empty:
+                drift_pct_per_stock = (valid_drift["Live Price"] - valid_drift["Close@PDF"]) / valid_drift["Close@PDF"] * 100
+                w = valid_drift["_client_value"] / client_stock_total
+                weighted_drift = float((w * drift_pct_per_stock).sum())
+            else:
+                weighted_drift = 0.0
+            return_si = pdf_port_anchor + weighted_drift
+
+        # Nifty 500 — PDF BSE anchor + Nifty 500 move since PDF date (EOD)
+        nifty_si = None
+        if pdf_bse_anchor is not None:
+            move = (nifty500_data or {}).get("move_since_pdf_pct")
+            if move is not None:
+                nifty_si = pdf_bse_anchor + move
+            else:
+                # If we couldn't fetch Nifty 500 move, show just the anchor
+                # with a marker (handled in display)
+                nifty_si = pdf_bse_anchor
+
+        return {
+            "day_chg_pct": day_chg,
+            "return_since_inception_pct": return_si,
+            "nifty500_since_inception_pct": nifty_si,
+        }
+
+    metrics_per_client = {name: _client_drift_metrics(name) for name in cg["Client Name"]}
+
+    def _fmt_pct(v):
+        return f"{v:+.2f}%" if v is not None else "—"
+
+    cg["Day Chg %"]                = cg["Client Name"].map(lambda n: _fmt_pct(metrics_per_client[n]["day_chg_pct"]))
+    cg["Return Since Inception"]   = cg["Client Name"].map(lambda n: _fmt_pct(metrics_per_client[n]["return_since_inception_pct"]))
+    cg["BSE 500 Since Inception"] = cg["Client Name"].map(lambda n: _fmt_pct(metrics_per_client[n]["nifty500_since_inception_pct"]))
+
+    cg["Portfolio Value"] = cg["Portfolio_Value"].map(lambda x: f"₹{x:,.0f}")
+    cg["% of AUM"]       = cg["% of AUM"].map(lambda x: f"{x:.2f}%")
+
+    client_event = st.dataframe(
+        cg[["Client Name","Stocks","Portfolio Value","% of AUM",
+            "Day Chg %","Return Since Inception","BSE 500 Since Inception"]],
+        width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="single-row", key="client_table",
+    )
+
+    _clicked_client_rows = client_event.get("selection", {}).get("rows", []) if client_event else []
+
+    if _clicked_client_rows:
+        clicked_client = cg_raw.iloc[_clicked_client_rows[0]]["Client Name"]
+        st.markdown(f"**{clicked_client} — Individual Holdings**")
+
+        # Pull this client's rows straight from the holding statement (raw_df),
+        # not from the portfolio-level table — per the requirement that this
+        # must be fetched from the holding sheet only, not derived/approximated.
+        client_rows = raw_df[raw_df["Client Name"] == clicked_client].copy()
+        client_rows = client_rows[client_rows["Portfolio Value Client Currency"] != 0]
+
+        # Same name-cleaning regex used for the main holdings table, applied
+        # here too so display names look consistent across both views.
+        client_rows["Stock"] = (
+            client_rows["Instrument Name"]
+            .str.replace(r"\s+EQ\s*$",           "",    regex=True)
+            .str.replace(r"\s+EQ\s+FV.*$",       "",    regex=True)
+            .str.replace(r"\s+FV\s+.*$",         "",    regex=True)
+            .str.replace(r"\s+FV[0-9].*$",       "",    regex=True)
+            .str.replace(r"\s+UNLISTED$",        "",    regex=True)
+            .str.replace(r"\bLIMITED\b",         "LTD", regex=True)
+            .str.replace(r"EQ NEW FV RE\..*$",   "",    regex=True)
+            .str.strip()
+        )
+
+        # ── Cash + dividend receivable for THIS client (from the PDF) ──
+        # Looked up by uppercase Client Name (verified to match PDF naming
+        # exactly across all 21 clients in the test PDF). Falls through
+        # with zeros if this client wasn't in the PDF — e.g. brand new
+        # client added to the Excel before the next factsheet arrives.
+        client_cash_entry = cash_by_client.get(clicked_client.upper(), {})
+        client_cash       = client_cash_entry.get("cash", 0)
+        client_div        = client_cash_entry.get("dividend_receivable", 0)
+        client_cash_total = client_cash + client_div
+
+        stock_total       = client_rows["Portfolio Value Client Currency"].sum()
+        client_total      = stock_total + client_cash_total  # corrected total includes cash
+
+        client_rows["% of Client Portfolio"] = (
+            client_rows["Portfolio Value Client Currency"] / client_total * 100
+        ).round(2)
+
+        client_disp = (
+            client_rows[["Stock", "Logical Position", "Market Price",
+                         "Portfolio Value Client Currency", "% of Client Portfolio"]]
+            .sort_values("Portfolio Value Client Currency", ascending=False)
+            .rename(columns={
+                "Logical Position": "Quantity",
+                "Market Price": "Price",
+                "Portfolio Value Client Currency": "Market Value",
+            })
+        )
+        client_disp["Price"]        = client_disp["Price"].map(lambda x: f"₹{x:,.2f}")
+        client_disp["Market Value"] = client_disp["Market Value"].map(lambda x: f"₹{x:,.0f}")
+        client_disp["% of Client Portfolio"] = client_disp["% of Client Portfolio"].map(lambda x: f"{x:.2f}%")
+
+        # Append a Cash & Equivalents row at the bottom of the displayed
+        # table — only if we actually have a number for this client.
+        if client_cash_total > 0:
+            cash_pct = (client_cash_total / client_total * 100) if client_total else 0
+            cash_row = pd.DataFrame([{
+                "Stock": "Cash & Equivalents",
+                "Quantity": "–",
+                "Price": "–",
+                "Market Value": f"₹{client_cash_total:,.0f}",
+                "% of Client Portfolio": f"{cash_pct:.2f}%",
+            }])
+            client_disp = pd.concat([client_disp, cash_row], ignore_index=True)
+
+        st.dataframe(client_disp, width="stretch", hide_index=True)
+        if client_cash_total > 0:
+            st.caption(
+                f"{len(client_rows)} stock holdings + cash · "
+                f"Total: ₹{client_total:,.0f} "
+                f"(stocks ₹{stock_total:,.0f}, cash ₹{client_cash_total:,.0f})"
+            )
+        else:
+            st.caption(f"{len(client_rows)} holdings · Total: ₹{stock_total:,.0f} (cash data not available for this client)")
+
+
+
+# ─────────────────────────────────────────────────────────────
+# NEWS & BSE FILINGS
+# ─────────────────────────────────────────────────────────────
+# Behaviour (as agreed):
+#   - Two separate tabs: BSE Filings and Google News — not merged.
+#   - Plain browser refresh (F5) -> brand new Streamlit session -> full
+#     rebuild from scratch.
+#   - "Refresh prices now" button -> session_state SURVIVES -> incremental
+#     top-up: fetch again, only PREPEND items genuinely new.
+#   - Clicking a stock row in the holdings table -> filters both tabs to
+#     just that company. News: 10 most recent (uncapped by time, "load
+#     more" reaches further back). BSE: strictly last 72 hours, no backfill.
+#   - Default (nothing clicked): same rules, applied across all holdings.
+
+def _render_news_card(item: dict, is_bse: bool):
+    """One feed item, styled for the dark-fintech card treatment.
+    BSE filings get a blue left-edge accent, news gets a green one —
+    purely a quiet visual sort cue, not a status signal."""
+    title   = item.get("title", "Untitled")
+    url     = item.get("url", "#")
+    company = item.get("_company", "")
+    dt      = item.get("_parsed_dt")
+    ts_str  = dt.strftime("%d %b %Y · %H:%M") if dt else "Unknown time"
+    edge_color = "#5b8def" if is_bse else "#3ddc84"
+    meta = item.get("category", "BSE") if is_bse else item.get("source", "Unknown")
+
+    st.markdown(f"""
+    <div style="
+        border: 1px solid #232b38;
+        border-left: 3px solid {edge_color};
+        border-radius: 4px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
+        background: #141a24;
+    ">
+        <a href="{url}" target="_blank" style="
+            color: #e8ecf1; font-size: 0.94rem; font-weight: 600;
+            text-decoration: none; line-height: 1.45; display: block;
+        ">{title}</a>
+        <div style="margin-top: 8px; font-size: 0.78rem; color: #6b7a90; font-family: 'IBM Plex Mono', monospace;">
+            {company}  ·  {meta}  ·  {ts_str}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+st.divider()
+st.markdown('<div class="section-title">News & BSE Filings</div>', unsafe_allow_html=True)
+
+if not NEWS_MODULE_AVAILABLE:
+    st.error(
+        f"News module could not be loaded ({_NEWS_IMPORT_ERROR}). "
+        f"Make sure `news_fetch.py` and `watchlist.json` are uploaded to the same "
+        f"GitHub folder as `app.py`, and that `bse` + `requests` are installed."
+    )
+else:
+    # ── Visible relevance-filter status — avoids needing to dig through
+    # Streamlit Cloud logs to answer "is the AI filter actually on?" ──
+    try:
+        import news_filter as _nf_status
+        _status = _nf_status.get_filter_status()
+        if _status["active"]:
+            st.caption(f"🟢 Relevance filter: ON — {_status['reason']}")
+        else:
+            st.caption(f"🔴 Relevance filter: OFF — {_status['reason']}")
+    except Exception as _status_err:
+        st.caption(f"🔴 Relevance filter: could not check status ({_status_err})")
+
+    # ── Session-state-backed fetch: distinguishes "fresh session" (F5)
+    # from "button click within the same session" (price refresh) ──
+    if "news_feed_all" not in st.session_state:
+        with st.spinner("Fetching news & BSE filings across your portfolio…"):
+            st.session_state.news_feed_all = news_fetch.get_portfolio_wide_feed(
+                news_count=10, bse_hours=72,
+            )
+        st.session_state.news_feed_fetched_at = datetime.now()
+
+    if "news_feed_per_stock" not in st.session_state:
+        st.session_state.news_feed_per_stock = {}
+
+    # ── Incremental top-up, triggered by the price-refresh flow ──
+    if st.session_state.get("_do_news_topup"):
+        with st.spinner("Checking for newer items…"):
+            fresh = news_fetch.get_portfolio_wide_feed(news_count=10, bse_hours=72)
+        existing_urls = {item.get("url") for item in st.session_state.news_feed_all}
+        new_items = [item for item in fresh if item.get("url") not in existing_urls]
+        if new_items:
+            st.session_state.news_feed_all = new_items + st.session_state.news_feed_all
+            st.toast(f"{len(new_items)} new item(s) added")
+        st.session_state["_do_news_topup"] = False
+
+    topup_col, ts_col = st.columns([1, 4])
+    with topup_col:
+        if st.button("Check for updates"):
+            st.session_state["_do_news_topup"] = True
+            st.rerun()
+    with ts_col:
+        fetched_at = st.session_state.get("news_feed_fetched_at")
+        if fetched_at:
+            st.caption(f"Last updated: {fetched_at.strftime('%d %b %Y, %H:%M')}")
+
+    # ── Resolve which feed (portfolio-wide vs per-stock) to show ──
+    if clicked_stock_isin:
+        clear_col, label_col = st.columns([1, 4])
+        with clear_col:
+            if st.button("✕ Clear filter"):
+                st.session_state["holdings_table"] = {"selection": {"rows": []}}
+                st.rerun()
+        with label_col:
+            st.markdown(f"**Showing: {clicked_stock_name}**")
+
+        cache_key = clicked_stock_isin
+        if cache_key not in st.session_state.news_feed_per_stock:
+            with st.spinner(f"Fetching news & filings for {clicked_stock_name}…"):
+                st.session_state.news_feed_per_stock[cache_key] = news_fetch.get_combined_feed(
+                    isin=clicked_stock_isin,
+                    company_name=clicked_stock_name,
+                    news_count=10,
+                    bse_hours=72,
+                )
+        feed_items = st.session_state.news_feed_per_stock[cache_key]
+    else:
+        feed_items = st.session_state.news_feed_all
+
+    load_more_key = f"news_load_count_{clicked_stock_isin or 'ALL'}"
+    if load_more_key not in st.session_state:
+        st.session_state[load_more_key] = 10
+
+    bse_items  = [i for i in feed_items if i.get("_type") == "bse"]
+    news_items = [i for i in feed_items if i.get("_type") == "news"]
+
+    tab_bse, tab_news = st.tabs([f"BSE Filings ({len(bse_items)})", f"Google News ({len(news_items)})"])
+
+    with tab_bse:
+        if not bse_items:
+            st.info("No BSE filings in the last 72 hours for this selection.")
+        else:
+            for item in bse_items:
+                _render_news_card(item, is_bse=True)
+
+    with tab_news:
+        if not news_items:
+            st.info("No recent news found for this selection. Try 'Check for updates'.")
+        else:
+            for item in news_items:
+                _render_news_card(item, is_bse=False)
+
+            # "Load more" only makes sense in the per-stock view
+            if clicked_stock_isin:
+                if st.button("Load more news"):
+                    st.session_state[load_more_key] += 10
+                    with st.spinner("Loading more news…"):
+                        st.session_state.news_feed_per_stock[clicked_stock_isin] = news_fetch.get_combined_feed(
+                            isin=clicked_stock_isin,
+                            company_name=clicked_stock_name,
+                            news_count=st.session_state[load_more_key],
+                            bse_hours=72,
+                        )
+                    st.rerun()
+
+
+
