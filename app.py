@@ -621,7 +621,7 @@ def _get_bse_scripcode(isin: str):
         global _bse_quote_client
         if _bse_quote_client is None:
             _bse_quote_client = BSE(download_folder="./_bse_tmp")
-        result = _bse_quote_client.lookup(isin)
+        result = _bse_call_with_retry(_bse_quote_client.lookup, isin)
         scripcode = result.get("bse_code") if result else None
         if scripcode:
             _bse_isin_cache[isin] = scripcode  # only cache success
@@ -629,6 +629,31 @@ def _get_bse_scripcode(isin: str):
     except Exception as e:
         print(f"[app] BSE lookup failed for ISIN {isin}: {e}")
         return None  # NOT cached — next call will retry
+
+
+def _bse_call_with_retry(fn, *args, attempts=3, delay=0.6, **kwargs):
+    """
+    Calls fn(*args, **kwargs), retrying on failure up to `attempts` times
+    with a short pause between tries.
+
+    WHY THIS EXISTS: BSE's own request timeout is 10s per call. Under
+    normal load, some individual requests (quote/history fetches) can be
+    slow enough to time out while others succeed — essentially random,
+    since it depends on momentary server responsiveness. Without a
+    retry, this shows up as "a different random subset of stocks fails
+    every time you refresh" — exactly the symptom reported. A couple of
+    extra attempts per stock, with a brief pause, gives each one more
+    than one roll of the dice before we give up on it for this refresh.
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(delay)
+    raise last_err
 
 
 def _fetch_bse_quote(isin: str):
@@ -649,7 +674,7 @@ def _fetch_bse_quote(isin: str):
         if _bse_quote_client is None:
             from bse import BSE
             _bse_quote_client = BSE(download_folder="./_bse_tmp")
-        q = _bse_quote_client.quote(scripcode)
+        q = _bse_call_with_retry(_bse_quote_client.quote, scripcode)
         live_price = q.get("LTP")
         prev_close = q.get("PrevClose")
         if live_price is None:
@@ -697,7 +722,7 @@ def _fetch_bse_history(isin: str):
         if _bse_quote_client is None:
             from bse import BSE
             _bse_quote_client = BSE(download_folder="./_bse_tmp")
-        res = _bse_quote_client.equityPriceVolumeT12M(scripcode)
+        res = _bse_call_with_retry(_bse_quote_client.equityPriceVolumeT12M, scripcode)
         data = res.get("Data") or {}
         fields = data.get("fields") or []
         rows = data.get("data") or []
